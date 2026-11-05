@@ -29,6 +29,8 @@ JOBS="$(sysctl -n hw.ncpu)"
 
 # spec: PORT.md 0004-llvm-targets-x86-aarch64.patch -- the langref's examples build for wasm32, a target this LLVM lacks
 NO_LANGREF=-Dno-langref
+# platform: GitHub's macos-26 runners have 7 GiB; Zig refuses its compiler step (max_rss 8 GB) on less unless told --maxrss
+MAXRSS='--maxrss;8000000000'
 if [ "$ARCH" = arm64 ]; then
   STAGE="$CROSS_STAGE_ROOT$CROSS_PREFIX"
   SDK="$(sh "$SHIPYARD_SCRIPTS/fetch_sdk.sh" --arch arm64)"
@@ -39,7 +41,7 @@ if [ "$ARCH" = arm64 ]; then
   LIBC_FILE="$BUILD/libc-$ARCH.txt"
   set -- -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
     -DZIG_TARGET_TRIPLE=aarch64-macos.11.0 -DZIG_TARGET_MCPU=baseline \
-    "-DZIG_EXTRA_BUILD_ARGS=--sysroot;$SDK;--libc;$LIBC_FILE;--search-prefix;/usr;$NO_LANGREF"
+    "-DZIG_EXTRA_BUILD_ARGS=--sysroot;$SDK;--libc;$LIBC_FILE;--search-prefix;/usr;$MAXRSS;$NO_LANGREF"
 else
   STAGE="$NATIVE_STAGE_ROOT$NATIVE_PREFIX"
   CLANG22="${CLANG22:-/usr/local/mavergreen/clang22}"
@@ -47,7 +49,7 @@ else
   : "${LIPO:=$CLANG22/bin/llvm-lipo}"; export LIPO
   SDK="$(sh "$SHIPYARD_SCRIPTS/fetch_sdk.sh" --arch x86_64)"
   set -- -DCMAKE_C_COMPILER="$CLANG22/bin/clang" -DCMAKE_CXX_COMPILER="$CLANG22/bin/clang++" \
-    -DCMAKE_AR="$CLANG22/bin/llvm-ar" -DCMAKE_RANLIB="$CLANG22/bin/llvm-ranlib" "-DZIG_EXTRA_BUILD_ARGS=--sysroot;$SDK;$NO_LANGREF" \
+    -DCMAKE_AR="$CLANG22/bin/llvm-ar" -DCMAKE_RANLIB="$CLANG22/bin/llvm-ranlib" "-DZIG_EXTRA_BUILD_ARGS=--sysroot;$SDK;$MAXRSS;$NO_LANGREF" \
     -DZIG_TARGET_TRIPLE=x86_64-macos.10.9 -DZIG_TARGET_MCPU=baseline
 fi
 # platform: 10.9's make is a Command Line Tools stub; ninja is not

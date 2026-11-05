@@ -68,10 +68,11 @@ ZIG_GLOBAL_CACHE_DIR="$BUILD/zig-global-cache"; ZIG_LOCAL_CACHE_DIR="$BUILD/zig-
 export ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
 # platform: --sysroot would re-root --search-prefix's -L under the SDK; SDKROOT names the SDK of every 10.9 target alone
 SDKROOT="$SDK"; export SDKROOT
+# platform: GitHub's macos-26 runners have 7 GiB; Zig refuses its compiler step (max_rss 8 GB) on less unless told --maxrss
 # spec: PORT.md 0004-llvm-targets-x86-aarch64.patch -- the langref's examples build for wasm32, a target this LLVM lacks
 (cd "$SRC" && "$BUILDER" build -Doptimize=ReleaseFast -Dtarget=x86_64-macos.10.9 -Dcpu=x86_64 -Denable-llvm -Dstatic-llvm \
   --search-prefix "$LLVM" -Dversion-string="$ZIG_VERSION" --prefix "$STAGE" \
-  -Dno-langref "-Dllvm-targets=$LLVM_TARGETS" \
+  --maxrss 8000000000 -Dno-langref "-Dllvm-targets=$LLVM_TARGETS" \
   -Dllvm-has-zlib="$(llvm_on LLVM_ENABLE_ZLIB)" -Dllvm-has-zstd="$(llvm_on LLVM_ENABLE_ZSTD)") >&2
 
 [ -f "$STAGE/bin/zig" ] && [ -d "$STAGE/lib/zig/std" ] || { echo "FATAL: zig build left no bin/zig and lib/zig/ in $STAGE" >&2; exit 1; }
