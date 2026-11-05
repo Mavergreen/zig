@@ -1,0 +1,69 @@
+{
+  "0.17.1": {
+    "version": "0.17.1",
+    "date": "2026-11-02",
+    "src": {
+      "tarball": "https://ziglang.org/download/0.17.1/zig-0.17.1.tar.xz",
+      "shasum": "1e89bf06610b769a8c77676c6c8d54b093a0db60f4891f2f91014829012f0e24",
+      "size": "23183076"
+    },
+    "bootstrap": {
+      "tarball": "https://ziglang.org/download/0.17.1/zig-bootstrap-0.17.1.tar.xz",
+      "shasum": "58c099060ad9237496c7e7f57235d9eb9e5a3713e7df5f90d8ccc06391a359dd",
+      "size": "57776428"
+    },
+    "x86_64-macos": {
+      "tarball": "https://ziglang.org/download/0.17.1/zig-x86_64-macos-0.17.1.tar.xz",
+      "shasum": "9af07b20319fbd0c92ee46ad23e81d6a782b1aaea2cfb8dcbff35f1d2c7ddbb7",
+      "size": "59496824"
+    },
+    "x86_64-linux": {
+      "tarball": "https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz",
+      "shasum": "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a",
+      "size": "57411036"
+    }
+  },
+  "0.17.0": {
+    "version": "0.17.0",
+    "date": "2026-10-01",
+    "src": {
+      "tarball": "https://ziglang.org/download/0.17.0/zig-0.17.0.tar.xz",
+      "shasum": "b6c7f1728f043700d6529bac980800792f824256a9d2f1839b3d62beed0b8abd",
+      "size": "23049960"
+    },
+    "bootstrap": {
+      "tarball": "https://ziglang.org/download/0.17.0/zig-bootstrap-0.17.0.tar.xz",
+      "shasum": "1e9e9b8e3c753b35dfb1d9ea48f097579fadbd3e5c1e724ab3fc5bce05477b71",
+      "size": "57030388"
+    },
+    "x86_64-macos": {
+      "tarball": "https://ziglang.org/download/0.17.0/zig-x86_64-macos-0.17.0.tar.xz",
+      "shasum": "4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6",
+      "size": "59317572"
+    },
+    "aarch64-macos": {
+      "tarball": "https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz",
+      "shasum": "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a",
+      "size": "53985220"
+    },
+    "x86_64-linux": {
+      "tarball": "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz",
+      "shasum": "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026",
+      "size": "57332648"
+    }
+  },
+  "0.16.0": {
+    "version": "0.16.0",
+    "date": "2026-04-13",
+    "src": {
+      "tarball": "https://ziglang.org/download/0.16.0/zig-0.16.0.tar.xz",
+      "shasum": "43186959edc87d5c7a1be7b7d2a25efffd22ce5807c7af99067f86f99641bfdf",
+      "size": "22503260"
+    },
+    "x86_64-macos": {
+      "tarball": "https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz",
+      "shasum": "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7",
+      "size": "57396836"
+    }
+  }
+}
