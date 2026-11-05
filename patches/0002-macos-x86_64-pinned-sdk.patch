@@ -1,0 +1,450 @@
+--- a/lib/std/zig/system/darwin.zig
++++ b/lib/std/zig/system/darwin.zig
+@@ -56,7 +56,10 @@ pub fn getSdk(gpa: Allocator, io: Io, target: *const Target) ?[]const u8 {
+         .exited => |code| if (code != 0) return null,
+         else => return null,
+     }
+-    return gpa.dupe(u8, mem.trimEnd(u8, result.stdout, "\r\n")) catch null;
++    const path = mem.trimEnd(u8, result.stdout, "\r\n");
++    // The Command Line Tools for 10.9 have no SDK, and their xcrun says so by printing nothing.
++    if (path.len == 0) return null;
++    return gpa.dupe(u8, path) catch null;
+ }
+ 
+ test {
+--- a/src/Compilation.zig
++++ b/src/Compilation.zig
+@@ -37,6 +37,7 @@ const InternPool = @import("InternPool.zig");
+ const Cache = std.Build.Cache;
+ const c_codegen = @import("codegen/c.zig");
+ const libtsan = @import("libs/libtsan.zig");
++const mavergreen = @import("mavergreen.zig");
+ const Zir = std.zig.Zir;
+ const Air = @import("Air.zig");
+ const Builtin = @import("Builtin.zig");
+@@ -1677,6 +1678,7 @@ pub const CreateDiagnostic = union(enum) {
+     illegal_zig_import,
+     cross_libc_unavailable,
+     find_native_libc: std.zig.LibCInstallation.FindError,
++    mavericks_sdk_missing,
+     libc_installation_missing_cc_dir,
+     libc_installation_missing_crt_dir,
+     create_cache_path: CreateCachePath,
+@@ -1693,6 +1695,7 @@ pub const CreateDiagnostic = union(enum) {
+             .illegal_zig_import => try w.writeAll("this compiler implementation does not support importing the root source file of a provided module"),
+             .cross_libc_unavailable => try w.writeAll("unable to provide libc for this target"),
+             .find_native_libc => |err| try w.print("failed to find libc installation: {t}", .{err}),
++            .mavericks_sdk_missing => try w.writeAll(mavergreen.sdk_missing_message),
+             .libc_installation_missing_cc_dir => try w.writeAll("libc installation is missing cc directory"),
+             .libc_installation_missing_crt_dir => try w.writeAll("libc installation is missing crt directory"),
+             .create_cache_path => |cache| try w.print("failed to create path '{s}' in {t} cache directory: {t}", .{
+@@ -1764,6 +1767,14 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
+ 
+         const link_libc = options.config.link_libc;
+ 
++        const libc_installation = options.libc_installation orelse if (link_libc)
++            mavergreen.libcInstallation(arena, io, options.dirs, target, options.sysroot, options.environ_map) catch |err| switch (err) {
++                error.OutOfMemory => |e| return e,
++                error.MavericksSdkMissing => return diag.fail(.mavericks_sdk_missing),
++            }
++        else
++            null;
++
+         const libc_dirs = std.zig.LibCDirs.detect(
+             arena,
+             io,
+@@ -1771,7 +1782,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
+             target,
+             options.root_mod.resolved_target.is_native_abi,
+             link_libc,
+-            options.libc_installation,
++            libc_installation,
+             options.environ_map,
+         ) catch |err| switch (err) {
+             error.OutOfMemory => |e| return e,
+--- a/src/link.zig
++++ b/src/link.zig
+@@ -23,6 +23,7 @@ const Type = @import("Type.zig");
+ const Value = @import("Value.zig");
+ const dev = @import("dev.zig");
+ const target_util = @import("target.zig");
++const mavergreen = @import("mavergreen.zig");
+ const codegen = @import("codegen.zig");
+ const crash_report = @import("crash_report.zig");
+ 
+@@ -1258,6 +1259,10 @@ pub const File = struct {
+             .limited(1024 * 1024 * 256),
+         ) catch |err| switch (err) {
+             error.OutOfMemory, error.Canceled => |e| return e,
++            error.FileNotFound => if (mavergreen.isMavericksTarget(comp.getTarget()))
++                return base.loadMavericksSdkPlist(sdk_settings_path)
++            else
++                return diags.failParse(sdk_settings_path, "failed to parse Darwin SDK settings: {t}", .{err}),
+             else => |e| return diags.failParse(sdk_settings_path, "failed to parse Darwin SDK settings: {t}", .{e}),
+         };
+ 
+@@ -1270,7 +1275,8 @@ pub const File = struct {
+             else => return diags.failParse(sdk_settings_path, "failed to parse Darwin SDK settings: file is not a JSON object", .{}),
+         };
+ 
+-        const version_json = parsed_object.get("MinimalDisplayName") orelse return diags.failParse(
++        // The family's 10.9 SDK carries only the SDKSettings.json keys LLVM reads, Version among them.
++        const version_json = parsed_object.get("MinimalDisplayName") orelse parsed_object.get("Version") orelse return diags.failParse(
+             sdk_settings_path,
+             "failed to parse Darwin SDK settings: 'MinimalDisplayName' missing",
+             .{},
+@@ -1287,6 +1293,23 @@ pub const File = struct {
+         try base.setDarwinSdkVersion(version);
+     }
+ 
++    /// Zig for Mavericks: Apple's 10.9 SDK, as Longboat's sdk109 installs it, has no SDKSettings.json;
++    /// the `Version` in its SDKSettings.plist is the SDK version.
++    fn loadMavericksSdkPlist(base: *File, sdk_settings_path: Path) Error!void {
++        const comp = base.comp;
++        const arena = comp.arena;
++        const plist_path: Path = .{
++            .root_dir = sdk_settings_path.root_dir,
++            .sub_path = try std.fs.path.join(arena, &.{
++                std.fs.path.dirname(sdk_settings_path.sub_path) orelse ".", "SDKSettings.plist",
++            }),
++        };
++        const version_str = (try mavergreen.sdkPlistVersion(arena, comp.io, plist_path.root_dir.handle, plist_path.sub_path)) orelse
++            return comp.link_diags.failParse(plist_path, "failed to parse Darwin SDK settings: no SDKSettings.json, and no top-level Version string in SDKSettings.plist", .{});
++        const version: DarwinSdkVersion = try .parse(&comp.link_diags, plist_path, version_str);
++        try base.setDarwinSdkVersion(version);
++    }
++
+     fn setDarwinSdkVersion(base: *File, version: DarwinSdkVersion) Error!void {
+         assert(!base.post_prelink);
+         switch (base.tag) {
+--- a/src/link/MachO.zig
++++ b/src/link/MachO.zig
+@@ -750,7 +750,8 @@ pub fn classifyInputFile(self: *MachO, input: link.Input) !void {
+         if (h.magic != macho.MH_MAGIC_64) break :blk;
+         switch (h.filetype) {
+             macho.MH_OBJECT => try self.addObject(path, fh, offset),
+-            macho.MH_DYLIB => _ = try self.addDylib(.fromLinkInput(input), true, fh, offset),
++            // An SDK's stub libraries (Mac OS X 10.9's, for one) are dylibs without code.
++            macho.MH_DYLIB, macho.MH_DYLIB_STUB => _ = try self.addDylib(.fromLinkInput(input), true, fh, offset),
+             else => return error.UnknownFileType,
+         }
+         return;
+@@ -1111,6 +1112,8 @@ fn parseDependentDylibs(self: *MachO) !void {
+                         .{},
+                     );
+                     has_errors = true;
++                    // Keep `dependents` in step with the dylib's list, which is walked beside it below.
++                    dependents.appendAssumeCapacity(0);
+                     continue;
+                 }
+             };
+@@ -1126,7 +1129,7 @@ fn parseDependentDylibs(self: *MachO) !void {
+                 if (readMachHeader(io, file, offset) catch null) |h| blk: {
+                     if (h.magic != macho.MH_MAGIC_64) break :blk;
+                     switch (h.filetype) {
+-                        macho.MH_DYLIB => break :file_index try self.addDylib(lib, false, fh, offset),
++                        macho.MH_DYLIB, macho.MH_DYLIB_STUB => break :file_index try self.addDylib(lib, false, fh, offset),
+                         else => break :file_index @as(File.Index, 0),
+                     }
+                 }
+@@ -1140,7 +1143,9 @@ fn parseDependentDylibs(self: *MachO) !void {
+             if (self.getFile(file_index)) |file| {
+                 const dep_dylib = file.dylib;
+                 try dep_dylib.parse(self); // TODO in parallel
+-                dep_dylib.hoisted = self.isHoisted(id.name);
++                // A 10.9 target reaches a sub-library through its umbrella, as ld64 does.
++                dep_dylib.hoisted = self.isHoisted(id.name) and !(mavergreen.isMavericksTarget(self.getTarget()) and
++                    (dep_dylib.sub_framework or dep_dylib.hasParentUmbrella(self.getFile(dylib.umbrella).?.dylib)));
+                 dep_dylib.umbrella = dylib.umbrella;
+                 if (!dep_dylib.hoisted) {
+                     const umbrella = dep_dylib.getUmbrella(self);
+@@ -1148,6 +1153,8 @@ fn parseDependentDylibs(self: *MachO) !void {
+                         // TODO rethink this entire algorithm
+                         try umbrella.addExport(gpa, dep_dylib.getString(off), flags);
+                     }
++                    // A binary umbrella (an SDK's stub, say) already has symbols for its own exports.
++                    try umbrella.initSymbols(self);
+                     try umbrella.rpaths.ensureUnusedCapacity(gpa, dep_dylib.rpaths.keys().len);
+                     for (dep_dylib.rpaths.keys()) |rpath| {
+                         umbrella.rpaths.putAssumeCapacity(try gpa.dupe(u8, rpath), {});
+@@ -5251,6 +5258,7 @@ const load_commands = @import("MachO/load_commands.zig");
+ const relocatable = @import("MachO/relocatable.zig");
+ const tapi = @import("tapi.zig");
+ const target_util = @import("../target.zig");
++const mavergreen = @import("../mavergreen.zig");
+ const trace = @import("../tracy.zig").trace;
+ const synthetic = @import("MachO/synthetic.zig");
+ 
+--- a/src/link/MachO/Dylib.zig
++++ b/src/link/MachO/Dylib.zig
+@@ -23,6 +23,11 @@ weak: bool,
+ reexport: bool,
+ explicit: bool,
+ hoisted: bool = true,
++/// Has LC_SUB_FRAMEWORK: a library its umbrella re-exports and clients reach through the umbrella.
++sub_framework: bool = false,
++/// A .tbd's `parent-umbrella` for this target: the umbrella that re-exports this library, as
++/// LC_SUB_FRAMEWORK names it in a binary stub. See `hasParentUmbrella`.
++parent_umbrella: ?MachO.String = null,
+ referenced: bool = false,
+ 
+ output_symtab_ctx: MachO.SymtabCtx = .{},
+@@ -121,6 +126,7 @@ fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
+             const path = cmd.getRpathPathName();
+             try self.rpaths.put(gpa, try gpa.dupe(u8, path), {});
+         },
++        .SUB_FRAMEWORK => self.sub_framework = true,
+         .BUILD_VERSION,
+         .VERSION_MIN_MACOSX,
+         .VERSION_MIN_IPHONEOS,
+@@ -200,8 +206,10 @@ fn parseTrieNode(
+         };
+         if (flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT != 0) {
+             _ = try it.readUleb128(); // dylib ordinal
+-            const name = try it.readString();
+-            try self.addExport(allocator, if (name.len > 0) name else prefix, out_flags);
++            // The name this library exports is the trie's; `name` is what the symbol is called in
++            // the library it comes from (10.9's libsystem_c exports _memchr as _platform_memchr's).
++            _ = try it.readString();
++            try self.addExport(allocator, prefix, out_flags);
+         } else if (flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER != 0) {
+             _ = try it.readUleb128(); // stub offset
+             _ = try it.readUleb128(); // resolver offset
+@@ -276,6 +284,17 @@ fn parseTbd(self: *Dylib, macho_file: *MachO) !void {
+     var matcher = try TargetMatcher.init(gpa, cpu_arch, self.platform.?.toApplePlatform());
+     defer matcher.deinit();
+ 
++    if (try matcher.matchesTargetTbd(umbrella_lib)) switch (umbrella_lib) {
++        .v3 => |stub| if (stub.parent_umbrella) |name| {
++            self.parent_umbrella = try self.addString(gpa, name);
++        },
++        .v4 => |stub| if (stub.parent_umbrella) |entries| for (entries) |entry| {
++            if (!matcher.matchesTarget(entry.targets)) continue;
++            self.parent_umbrella = try self.addString(gpa, entry.umbrella);
++            break;
++        },
++    };
++
+     for (lib_stub.inner, 0..) |elem, stub_index| {
+         if (!(try matcher.matchesTargetTbd(elem))) continue;
+ 
+@@ -476,17 +495,20 @@ fn addObjCExport(
+     try self.addExport(allocator, full_name, .{});
+ }
+ 
+-fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
++/// Also called again on an umbrella after a re-exported library's exports were added to it,
++/// so it initializes only the exports that have no symbol yet.
++pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
+     const gpa = macho_file.base.comp.gpa;
+ 
++    const first = self.symbols.items.len;
+     const nsyms = self.exports.items(.name).len;
+     try self.symbols.ensureTotalCapacityPrecise(gpa, nsyms);
+     try self.symbols_extra.ensureTotalCapacityPrecise(gpa, nsyms * @sizeOf(Symbol.Extra));
+     try self.globals.ensureTotalCapacityPrecise(gpa, nsyms);
+     self.globals.resize(gpa, nsyms) catch unreachable;
+-    @memset(self.globals.items, 0);
++    @memset(self.globals.items[first..], 0);
+ 
+-    for (self.exports.items(.name), self.exports.items(.flags)) |noff, flags| {
++    for (self.exports.items(.name)[first..], self.exports.items(.flags)[first..]) |noff, flags| {
+         const index = self.addSymbolAssumeCapacity();
+         const symbol = &self.symbols.items[index];
+         symbol.name = noff;
+@@ -598,6 +620,19 @@ fn addString(self: *Dylib, allocator: Allocator, name: []const u8) !MachO.String
+     return .{ .pos = off, .len = @intCast(name.len + 1) };
+ }
+ 
++/// Whether `umbrella` is the one this library's .tbd names as its `parent-umbrella`, which names it
++/// as ld64 does: the install name's last component, without a leading "lib" and anything from its
++/// first '.' ("System" for /usr/lib/libSystem.B.dylib). Such a library is reached through its umbrella,
++/// as one with LC_SUB_FRAMEWORK is.
++pub fn hasParentUmbrella(self: Dylib, umbrella: *const Dylib) bool {
++    const parent = self.parent_umbrella orelse return false;
++    const id = umbrella.id orelse return false;
++    var leaf = fs.path.basename(id.name);
++    if (mem.startsWith(u8, leaf, "lib")) leaf = leaf["lib".len..];
++    if (mem.findScalar(u8, leaf, '.')) |dot| leaf = leaf[0..dot];
++    return mem.eql(u8, self.getString(parent), leaf);
++}
++
+ pub fn getString(self: Dylib, string: MachO.String) [:0]const u8 {
+     assert(string.pos < self.strtab.items.len and string.pos + string.len <= self.strtab.items.len);
+     if (string.len == 0) return "";
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -28,6 +28,7 @@ const link = @import("link.zig");
+ const build_options = @import("build_options");
+ const wasi_libc = @import("libs/wasi_libc.zig");
+ const target_util = @import("target.zig");
++const mavergreen = @import("mavergreen.zig");
+ const crash_report = @import("crash_report.zig");
+ const Zcu = @import("Zcu.zig");
+ const mingw = @import("libs/mingw.zig");
+@@ -4181,6 +4182,14 @@ fn createModule(
+ 
+         if (any_named_library_queries) create_module.want_native_include_dirs = true;
+ 
++        const mavericks_sdk: ?[]const u8 = if (create_module.libc_paths_file == null)
++            mavergreen.sdkDir(arena, io, create_module.dirs, target, create_module.sysroot, environ_map) catch |err| switch (err) {
++                error.OutOfMemory => |e| return e,
++                error.MavericksSdkMissing => fatal("{s}", .{mavergreen.sdk_missing_message}),
++            }
++        else
++            null;
++
+         // Resolve the library path arguments with respect to sysroot.
+         try create_module.lib_directories.ensureUnusedCapacity(arena, create_module.lib_dir_args.items.len);
+         for (create_module.lib_dir_args.items) |dir_arg| {
+@@ -4222,8 +4231,17 @@ fn createModule(
+             }
+         }
+ 
++        // A Mac OS X 10.9 target searches its SDK as ld64 searches -syslibroot's, and nothing
++        // xcrun names: the Command Line Tools' answer is empty on 10.9, and Xcode's is a newer SDK.
++        if (mavericks_sdk) |sdk| {
++            try create_module.lib_directories.ensureUnusedCapacity(arena, 1);
++            appendLibDirOrWarnAllowMissing(io, &create_module.lib_directories, try fs.path.join(arena, &.{ sdk, "usr", "lib" }));
++            try create_module.framework_directories.ensureUnusedCapacity(arena, 1);
++            appendLibDirOrWarnAllowMissing(io, &create_module.framework_directories, try fs.path.join(arena, &.{ sdk, "System", "Library", "Frameworks" }));
++        }
++
+         // Trigger native system library path detection if necessary.
+-        if (create_module.sysroot == null and
++        if (create_module.sysroot == null and mavericks_sdk == null and
+             resolved_target.is_native_os and resolved_target.is_native_abi and
+             create_module.want_native_include_dirs)
+         {
+--- /dev/null
++++ b/src/mavergreen.zig
+@@ -0,0 +1,129 @@
++//! Zig for Mavericks: what this Zig does differently for Mac OS X 10.9 targets.
++//! The Mavergreen zig repo's PORT.md explains each piece.
++
++const std = @import("std");
++const Allocator = std.mem.Allocator;
++const Io = std.Io;
++const LibCInstallation = std.zig.LibCInstallation;
++
++/// An x86_64 macOS target whose deployment floor is below 11.0: a Mac OS X 10.9 target.
++/// An explicit 11.0 or later, and every other arch, is upstream's.
++pub fn isMavericksTarget(target: *const std.Target) bool {
++    if (target.os.tag != .macos or target.cpu.arch != .x86_64) return false;
++    return target.os.version_range.semver.min.order(.{ .major = 11, .minor = 0, .patch = 0 }) == .lt;
++}
++
++pub const sdk_missing_message = "the Mac OS X 10.9 SDK is not installed; run: sudo longboat sdk install 10.9";
++
++/// The SDK a Mac OS X 10.9 target compiles and links against: `sysroot` when given, else
++/// `SDKROOT` when set, else the installed `<prefix>/SDKs/MacOSX10.9.sdk` beside this Zig's
++/// `<prefix>/lib/zig`. Null for any other target. Never asks xcrun: the Command Line Tools'
++/// answer is empty on 10.9, and Xcode's is a newer SDK.
++pub fn sdkDir(
++    arena: Allocator,
++    io: Io,
++    dirs: std.zig.Directories,
++    target: *const std.Target,
++    sysroot: ?[]const u8,
++    environ_map: *const std.process.Environ.Map,
++) error{ OutOfMemory, MavericksSdkMissing }!?[]const u8 {
++    if (!isMavericksTarget(target)) return null;
++    if (sysroot) |s| return s;
++    if (environ_map.get("SDKROOT")) |s| if (s.len != 0) return s;
++    const sdk = try std.fs.path.resolveAlloc(arena, &.{
++        dirs.cwd, dirs.zig_lib.path orelse ".", "..", "..", "SDKs", "MacOSX10.9.sdk",
++    });
++    // Longboat's sdk109 is Apple's 10.9 SDK, with SDKSettings.plist and no SDKSettings.json. An
++    // SDK whose settings name no version for the linker to record is not installed for this
++    // Zig's purposes.
++    const json = try std.fs.path.join(arena, &.{ sdk, "SDKSettings.json" });
++    if (Io.Dir.cwd().access(io, json, .{})) |_| return sdk else |_| {}
++    const plist = try std.fs.path.join(arena, &.{ sdk, "SDKSettings.plist" });
++    _ = (sdkPlistVersion(arena, io, Io.Dir.cwd(), plist) catch |err| switch (err) {
++        error.OutOfMemory => |e| return e,
++        error.Canceled => return error.MavericksSdkMissing,
++    }) orelse return error.MavericksSdkMissing;
++    return sdk;
++}
++
++/// The `Version` of the SDKSettings.plist at `sub_path`, as `plistSdkVersion` reads it; null when
++/// the file cannot be read or is over 64 KiB.
++pub fn sdkPlistVersion(arena: Allocator, io: Io, root: Io.Dir, sub_path: []const u8) error{ OutOfMemory, Canceled }!?[]const u8 {
++    const contents = root.readFileAlloc(io, sub_path, arena, .limited(64 * 1024)) catch |err| switch (err) {
++        error.OutOfMemory, error.Canceled => |e| return e,
++        else => return null,
++    };
++    return plistSdkVersion(contents);
++}
++
++/// The SDK version an XML SDKSettings.plist names: the `<string>` after the one `<key>Version</key>`
++/// of its top-level dictionary, numbers such as `10.9` or `10.9.5`. A strict text scan rather than a
++/// plist parser, for the plists Apple's SDKs carry: null for anything else (a binary plist, a
++/// comment left open, CDATA, unbalanced dictionaries, no top-level `Version` or more than one, or a
++/// value that is not such a `<string>`), so an SDK whose version cannot be known is refused.
++pub fn plistSdkVersion(contents: []const u8) ?[]const u8 {
++    const mem = std.mem;
++    if (!mem.startsWith(u8, contents, "<?xml ")) return null;
++    if (mem.indexOf(u8, contents, "<plist version=\"1.0\">") == null) return null;
++    const key = "<key>Version</key>";
++    var depth: usize = 0;
++    var version: ?[]const u8 = null;
++    var i: usize = 0;
++    while (mem.indexOfScalarPos(u8, contents, i, '<')) |lt| {
++        const rest = contents[lt..];
++        if (mem.startsWith(u8, rest, "<!--")) {
++            i = (mem.indexOfPos(u8, contents, lt + 4, "-->") orelse return null) + 3;
++        } else if (mem.startsWith(u8, rest, "<![CDATA[")) {
++            return null;
++        } else if (mem.startsWith(u8, rest, "<dict>")) {
++            depth += 1;
++            i = lt + "<dict>".len;
++        } else if (mem.startsWith(u8, rest, "</dict>")) {
++            if (depth == 0) return null;
++            depth -= 1;
++            i = lt + "</dict>".len;
++        } else if (mem.startsWith(u8, rest, key)) {
++            i = lt + key.len;
++            if (depth != 1) continue;
++            if (version != null) return null;
++            const value = mem.trimStart(u8, contents[i..], " \t\r\n");
++            if (!mem.startsWith(u8, value, "<string>")) return null;
++            const len = mem.indexOf(u8, value["<string>".len..], "</string>") orelse return null;
++            version = value["<string>".len..][0..len];
++            i = contents.len - value.len + "<string>".len + len + "</string>".len;
++        } else {
++            i = lt + 1;
++        }
++    }
++    if (depth != 0) return null;
++    const v = version orelse return null;
++    var parts: usize = 0;
++    var it = mem.splitScalar(u8, v, '.');
++    while (it.next()) |part| {
++        parts += 1;
++        if (part.len == 0 or part.len > 5) return null;
++        for (part) |c| if (!std.ascii.isDigit(c)) return null;
++    }
++    return if (parts == 2 or parts == 3) v else null;
++}
++
++/// The libc installation of a Mac OS X 10.9 target: its SDK's headers, frameworks and libSystem.
++pub fn libcInstallation(
++    arena: Allocator,
++    io: Io,
++    dirs: std.zig.Directories,
++    target: *const std.Target,
++    sysroot: ?[]const u8,
++    environ_map: *const std.process.Environ.Map,
++) error{ OutOfMemory, MavericksSdkMissing }!?*const LibCInstallation {
++    const sdk = (try sdkDir(arena, io, dirs, target, sysroot, environ_map)) orelse return null;
++    const include = try std.fs.path.join(arena, &.{ sdk, "usr", "include" });
++    const lci = try arena.create(LibCInstallation);
++    lci.* = .{
++        .include_dir = include,
++        .sys_include_dir = include,
++        .crt_dir = try std.fs.path.join(arena, &.{ sdk, "usr", "lib" }),
++        .darwin_sdk_dir = sdk,
++    };
++    return lci;
++}

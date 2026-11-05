@@ -1,0 +1,57 @@
+--- a/lib/std/crypto/Certificate/Bundle/macos.zig
++++ b/lib/std/crypto/Certificate/Bundle/macos.zig
+@@ -31,9 +31,44 @@
+         };
+     }
+ 
++    addMavergreenBundle(cb, gpa, io, now, mavergreen_bundle_path);
++
+     cb.bytes.shrinkAndFree(gpa, cb.bytes.items.len);
+ }
+ 
++/// Mavergreen's ca-certs bundle. Optional: when it is installed, its roots join the keychain's.
++pub const mavergreen_bundle_path = "/usr/local/mavergreen/ca-certs/etc/openssl/certs/ca-certificates.crt";
++
++/// Adds the PEM bundle at `path` to `cb`, all of it or none of it. An absent bundle adds nothing;
++/// one that cannot be read or parsed is skipped with one warning, leaving `cb` as it was.
++pub fn addMavergreenBundle(cb: *Bundle, gpa: Allocator, io: Io, now: Io.Timestamp, path: []const u8) void {
++    addPemBundle(cb, gpa, io, now, path) catch |err| switch (err) {
++        error.FileNotFound => {},
++        else => std.log.warn("skipping the ca-certs bundle {s}: {s}", .{ path, @errorName(err) }),
++    };
++}
++
++fn addPemBundle(cb: *Bundle, gpa: Allocator, io: Io, now: Io.Timestamp, path: []const u8) !void {
++    var file = try Io.Dir.cwd().openFile(io, path, .{});
++    defer file.close(io);
++    var file_reader = file.reader(io, &.{});
++
++    var extra: Bundle = .empty;
++    defer extra.deinit(gpa);
++    try extra.addCertsFromFile(gpa, &file_reader, now.toSeconds());
++    if (extra.map.count() == 0) return error.NoCertificates;
++
++    try cb.bytes.ensureUnusedCapacity(gpa, extra.bytes.items.len);
++    try cb.map.ensureUnusedCapacityContext(gpa, extra.map.count(), .{ .cb = cb });
++    var it = extra.map.valueIterator();
++    while (it.next()) |start| {
++        const cert = std.crypto.Certificate.der.Element.parse(extra.bytes.items, start.*) catch unreachable;
++        const cert_start: u32 = @intCast(cb.bytes.items.len);
++        cb.bytes.appendSliceAssumeCapacity(extra.bytes.items[start.*..cert.slice.end]);
++        cb.parseCert(gpa, cert_start, now.toSeconds()) catch unreachable;
++    }
++}
++
+ fn scanReader(cb: *Bundle, gpa: Allocator, reader: *Io.Reader, now_sec: i64) !void {
+     const db_header = try reader.takeStruct(ApplDbHeader, .big);
+     assert(mem.eql(u8, &db_header.signature, "kych"));
+--- a/lib/std/crypto/Certificate/Bundle.zig
++++ b/lib/std/crypto/Certificate/Bundle.zig
+@@ -89,6 +89,7 @@
+ }
+ 
+ const rescanMac = @import("Bundle/macos.zig").rescanMac;
++pub const addMavergreenBundle = @import("Bundle/macos.zig").addMavergreenBundle;
+ const RescanMacError = @import("Bundle/macos.zig").RescanMacError;
+ 
+ const RescanLinuxError = AddCertsFromFilePathError || AddCertsFromDirPathError;

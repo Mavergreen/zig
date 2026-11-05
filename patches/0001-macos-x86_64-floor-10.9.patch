@@ -1,0 +1,32 @@
+--- a/lib/std/Target.zig
++++ b/lib/std/Target.zig
+@@ -581,7 +581,10 @@
+                 },
+                 .macos => .{
+                     .semver = .{
+-                        .min = .{ .major = 15, .minor = 0, .patch = 0 },
++                        .min = if (arch == .x86_64)
++                            .{ .major = 10, .minor = 9, .patch = 0 }
++                        else
++                            .{ .major = 15, .minor = 0, .patch = 0 },
+                         .max = .{ .major = 27, .minor = 0, .patch = 0 },
+                     },
+                 },
+--- a/lib/std/zig/system.zig
++++ b/lib/std/zig/system.zig
+@@ -240,7 +240,14 @@
+                 os.version_range.windows.min = detected_version;
+                 os.version_range.windows.max = detected_version;
+             },
+-            .macos => try darwin.macos.detect(io, &os),
++            .macos => {
++                try darwin.macos.detect(io, &os);
++                if (builtin.cpu.arch == .x86_64 and query_cpu_arch == .x86_64 and
++                    os.version_range.semver.min.order(.{ .major = 11, .minor = 0, .patch = 0 }) == .lt)
++                {
++                    os.version_range.semver.min = .{ .major = 10, .minor = 9, .patch = 0 };
++                }
++            },
+             .freebsd, .netbsd, .dragonfly => {
+                 const key = switch (builtin.target.os.tag) {
+                     .freebsd => "kern.osreldate",

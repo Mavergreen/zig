@@ -1,0 +1,238 @@
+--- a/lib/compiler_rt/os_version_check.zig
++++ b/lib/compiler_rt/os_version_check.zig
+@@ -4,8 +4,10 @@ const builtin = @import("builtin");
+ const compiler_rt = @import("../compiler_rt.zig");
+ const symbol = compiler_rt.symbol;
+ 
++// Zig for Mavericks: a Mac OS X 10.9 program links Recaulk, which back-fills _availability_version_check.
+ const have_availability_version_check = builtin.os.tag.isDarwin() and
+-    builtin.os.version_range.semver.min.order(.{ .major = 10, .minor = 15, .patch = 0 }).compare(.gte);
++    (builtin.os.version_range.semver.min.order(.{ .major = 10, .minor = 15, .patch = 0 }).compare(.gte) or
++        (builtin.os.tag == .macos and builtin.cpu.arch == .x86_64));
+ 
+ comptime {
+     if (have_availability_version_check) {
+--- a/src/Compilation.zig
++++ b/src/Compilation.zig
+@@ -2536,7 +2536,10 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
+             if (comp.wantBuildLibUnwindFromSource()) {
+                 comp.queued_jobs.libunwind = true;
+             }
+-            if (build_options.have_llvm and is_exe_or_dyn_lib and comp.config.link_libcpp) {
++            // A Mac OS X 10.9 target links clang-22's libc++ on the system's libc++abi instead.
++            if (build_options.have_llvm and is_exe_or_dyn_lib and comp.config.link_libcpp and
++                !mavergreen.isMavericksTarget(target))
++            {
+                 comp.queued_jobs.libcxx = true;
+                 comp.queued_jobs.libcxxabi = true;
+             }
+@@ -6469,7 +6472,19 @@ fn addCommonCCArgs(
+                 }
+             }
+ 
+-            if (comp.config.link_libcpp) {
++            if (comp.config.link_libc and mavergreen.isMavericksTarget(target)) {
++                // Recaulk's headers declare its back-fills and adapt the 10.9 SDK's own, so they
++                // come first, as in clang22's.
++                try argv.append("-isystem");
++                try argv.append(try mavergreen.dir(arena, comp.dirs, &.{ "include", "recaulk" }));
++            }
++            if (comp.config.link_libcpp and mavergreen.isMavericksTarget(target)) {
++                // clang-22's libc++ headers, configured by their own __config_site for the
++                // libc++.a they belong to; that libc++ defines the aligned and sized operators.
++                try argv.append("-isystem");
++                try argv.append(try mavergreen.dir(arena, comp.dirs, &.{ "include", "c++", "v1" }));
++                try argv.append("--mavergreen-own-libcxx");
++            } else if (comp.config.link_libcpp) {
+                 try argv.append("-isystem");
+                 try argv.append(try fs.path.join(arena, &[_][]const u8{
+                     comp.dirs.zig_lib.path.?, "libcxx", "include",
+--- a/src/link.zig
++++ b/src/link.zig
+@@ -2024,6 +2024,9 @@ pub const Input = union(enum) {
+         file: Io.File,
+         must_link: bool,
+         hidden: bool,
++        /// Zig for Mavericks: an archive the toolchain links by itself (Recaulk, libc++), whose
++        /// members load only when they resolve a symbol, as without -ObjC.
++        toolchain_runtime: bool = false,
+     };
+ 
+     pub const Res = struct {
+--- a/src/link/MachO.zig
++++ b/src/link/MachO.zig
+@@ -389,6 +389,10 @@ pub fn flush(
+         self.classifyInputFile(input) catch |err|
+             diags.addParseError(input.path(), "failed to read input file: {t}", .{err});
+     }
++    self.loadMavericksRuntime() catch |err| switch (err) {
++        error.OutOfMemory => |e| return e,
++        else => |e| return diags.fail("failed to load the Mac OS X 10.9 runtime: {t}", .{e}),
++    };
+ 
+     try self.parseInputFiles();
+     self.parseDependentDylibs() catch |err| {
+@@ -710,7 +714,7 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
+             try argv.append(f_dir.path orelse ".");
+         }
+ 
+-        if (comp.config.link_libcpp) {
++        if (comp.config.link_libcpp and comp.libcxx_static_lib != null) {
+             try argv.appendSlice(&.{
+                 try comp.libcxxabi_static_lib.?.full_object_path.toString(arena),
+                 try comp.libcxx_static_lib.?.full_object_path.toString(arena),
+@@ -724,11 +728,76 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
+         if (comp.compiler_rt_obj) |obj| try argv.append(try obj.full_object_path.toString(arena));
+         if (comp.ubsan_rt_lib) |lib| try argv.append(try lib.full_object_path.toString(arena));
+         if (comp.ubsan_rt_obj) |obj| try argv.append(try obj.full_object_path.toString(arena));
++
++        if (mavergreen.isMavericksTarget(&comp.root_mod.resolved_target.result) and comp.config.link_libc) {
++            if (comp.config.link_libcpp) try argv.appendSlice(&.{
++                "-load_hidden", try mavergreen.dir(arena, comp.dirs, &.{ "x86_64-macos", "libc++.a" }),
++            });
++            try argv.appendSlice(&.{
++                "-load_hidden", try mavergreen.dir(arena, comp.dirs, &.{ "x86_64-macos", "librecaulk.a" }),
++            });
++            if (comp.config.link_libcpp) try argv.append("-lc++abi");
++        }
+     }
+ 
+     try Compilation.dumpArgv(io, argv.items);
+ }
+ 
++/// A Mac OS X 10.9 executable or dylib takes, after every other input, clang-22's libc++ (for
++/// C++), Recaulk's back-fills of what 10.9's libSystem lacks, then the system's libc++abi and
++/// the system libraries Recaulk calls into, in clang22's order. Both archives load hidden, so a
++/// dylib exports neither. Static libraries and objects take none: their consumer links Recaulk.
++fn loadMavericksRuntime(self: *MachO) !void {
++    const comp = self.base.comp;
++    if (!mavergreen.isMavericksTarget(&comp.root_mod.resolved_target.result) or !comp.config.link_libc) return;
++    const arena = comp.arena;
++    if (comp.config.link_libcpp) {
++        try self.loadMavericksArchive(try mavergreen.dir(arena, comp.dirs, &.{ "x86_64-macos", "libc++.a" }));
++    }
++    try self.loadMavericksArchive(try mavergreen.dir(arena, comp.dirs, &.{ "x86_64-macos", "librecaulk.a" }));
++    const sdk = comp.sysroot orelse return;
++    try self.loadMavericksDylib(sdk, "usr/lib/libc++abi", comp.config.link_libcpp);
++    for (mavergreen.recaulk_dependencies) |stem| try self.loadMavericksDylib(sdk, stem, false);
++}
++
++fn loadMavericksArchive(self: *MachO, path: []const u8) !void {
++    const comp = self.base.comp;
++    const file = Io.Dir.cwd().openFile(comp.io, path, .{}) catch |err|
++        return comp.link_diags.addError("this Zig for Mavericks is missing {s}: {t}", .{ path, err });
++    self.classifyInputFile(.{ .archive = .{
++        .path = .initCwd(path),
++        .file = file,
++        .must_link = false,
++        .hidden = true,
++        // Zig links as with -ObjC, which would load Recaulk's Objective-C members, and with them
++        // libobjc, into every program; clang22 links without it.
++        .toolchain_runtime = true,
++    } }) catch |err| comp.link_diags.addParseError(.initCwd(path), "failed to read input file: {t}", .{err});
++}
++
++/// `explicit` is a library the link names, kept whether or not anything references it; the
++/// others are kept only when referenced.
++fn loadMavericksDylib(self: *MachO, sdk: []const u8, stem: []const u8, explicit: bool) !void {
++    const comp = self.base.comp;
++    const io = comp.io;
++    for ([_][]const u8{ ".tbd", ".dylib", "" }) |ext| {
++        const path = try std.fmt.allocPrint(comp.arena, "{s}" ++ fs.path.sep_str ++ "{s}{s}", .{ sdk, stem, ext });
++        const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
++            error.FileNotFound => continue,
++            else => |e| return comp.link_diags.addParseError(.initCwd(path), "failed to open library: {t}", .{e}),
++        };
++        const fh = try self.addFileHandle(file);
++        const lib: SystemLib = .{ .path = .initCwd(path) };
++        if (mem.eql(u8, ext, ".tbd")) {
++            _ = try self.addTbd(lib, explicit, fh);
++        } else {
++            const fat_arch = try self.parseFatFile(file, lib.path);
++            _ = try self.addDylib(lib, explicit, fh, if (fat_arch) |fa| fa.offset else 0);
++        }
++        return;
++    }
++}
++
+ pub fn classifyInputFile(self: *MachO, input: link.Input) !void {
+     const tracy = trace(@src());
+     defer tracy.end();
+@@ -877,6 +946,7 @@ fn addArchive(self: *MachO, lib: link.Input.Object, handle: File.HandleIndex, fa
+         object.index = index;
+         object.alive = lib.must_link; // TODO: or self.options.all_load;
+         object.hidden = lib.hidden;
++        object.toolchain_runtime = lib.toolchain_runtime;
+         try self.objects.append(gpa, index);
+     }
+ }
+--- a/src/link/MachO/InternalObject.zig
++++ b/src/link/MachO/InternalObject.zig
+@@ -830,7 +830,7 @@ pub fn setSymbolExtra(self: *InternalObject, index: u32, extra: Symbol.Extra) vo
+     }
+ }
+ 
+-fn needsObjcMsgsendSymbol(self: InternalObject) bool {
++pub fn needsObjcMsgsendSymbol(self: InternalObject) bool {
+     for (self.sections.items(.extra)) |extra| {
+         if (extra.is_objc_methname or extra.is_objc_selref) return true;
+     }
+--- a/src/link/MachO/Object.zig
++++ b/src/link/MachO/Object.zig
+@@ -64,6 +64,8 @@ data_in_code: std.ArrayList(macho.data_in_code_entry) = .empty,
+ 
+ alive: bool = true,
+ hidden: bool = false,
++/// Zig for Mavericks: a member of a toolchain runtime archive, never force-loaded for -ObjC.
++toolchain_runtime: bool = false,
+ 
+ compact_unwind_ctx: CompactUnwindCtx = .{},
+ output_symtab_ctx: MachO.SymtabCtx = .{},
+@@ -298,7 +300,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
+     }
+ 
+     // Finally, we do a post-parse check for -ObjC to see if we need to force load this member anyhow.
+-    self.alive = self.alive or (macho_file.force_load_objc and self.hasObjC());
++    self.alive = self.alive or (macho_file.force_load_objc and !self.toolchain_runtime and self.hasObjC());
+ }
+ 
+ pub fn isCstringLiteral(sect: macho.section_64) bool {
+--- a/src/link/MachO/file.zig
++++ b/src/link/MachO/file.zig
+@@ -125,6 +125,11 @@ pub const File = union(enum) {
+             inline else => |x| x.symbols.items.len,
+         };
+         for (0..nsyms) |i| {
++            // The linker's own reference to _objc_msgSend is an import only when it made
++            // _objc_msgSend$ stubs; otherwise a libobjc in the link would be recorded unused.
++            if (file == .internal) if (file.internal.objc_msg_send_index) |idx| {
++                if (idx == i and !file.internal.needsObjcMsgsendSymbol()) continue;
++            };
+             const ref = file.getSymbolRef(@intCast(i), macho_file);
+             if (ref.getFile(macho_file) == null) continue;
+             const sym = ref.getSymbol(macho_file).?;
+--- a/src/mavergreen.zig
++++ b/src/mavergreen.zig
+@@ -60,3 +60,22 @@ pub fn libcInstallation(
+     };
+     return lci;
+ }
++
++/// `<prefix>/lib/mavergreen`, beside this Zig's `<prefix>/lib/zig`: Recaulk, clang-22's libc++ and
++/// their headers, the pieces a Mac OS X 10.9 program takes from clang22's toolchain.
++pub fn dir(arena: Allocator, dirs: std.zig.Directories, sub_path: []const []const u8) Allocator.Error![]const u8 {
++    var parts: std.ArrayList([]const u8) = .empty;
++    try parts.appendSlice(arena, &.{ dirs.cwd, dirs.zig_lib.path orelse ".", "..", "mavergreen" });
++    try parts.appendSlice(arena, sub_path);
++    return std.fs.path.resolveAlloc(arena, parts.items);
++}
++
++/// The frameworks and libraries Recaulk's back-fills call into, as its README lists them.
++/// A link takes each one only if something it links references it.
++pub const recaulk_dependencies = [_][]const u8{
++    "System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
++    "System/Library/Frameworks/Security.framework/Security",
++    "System/Library/Frameworks/CoreServices.framework/CoreServices",
++    "System/Library/Frameworks/IOKit.framework/IOKit",
++    "usr/lib/libobjc",
++};

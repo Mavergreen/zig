@@ -1,0 +1,380 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -743,6 +743,9 @@
+   -Denable-llvm
+   "-Dconfig_h=${ZIG_CONFIG_H_OUT}"
+ )
++if(LLVM_TARGETS_BUILT_SPACES)
++  list(APPEND ZIG_BUILD_ARGS "-Dllvm-targets=${LLVM_TARGETS_BUILT_SPACES}")
++endif()
+ 
+ set(ZIG_EXTRA_BUILD_ARGS "" CACHE STRING "Extra zig build args")
+ if(ZIG_EXTRA_BUILD_ARGS)
+--- a/build.zig
++++ b/build.zig
+@@ -150,6 +150,13 @@
+         "llvm-has-xtensa",
+         "Whether LLVM has the experimental target xtensa enabled",
+     ) orelse false;
++    const llvm_targets = b.option(
++        []const u8,
++        "llvm-targets",
++        "The LLVM targets built, as llvm-config --targets-built prints them (default: all of them)",
++    ) orelse "";
++    const llvm_has_zlib = b.option(bool, "llvm-has-zlib", "Whether LLVM was built with zlib (-Dstatic-llvm links it)") orelse true;
++    const llvm_has_zstd = b.option(bool, "llvm-has-zstd", "Whether LLVM was built with zstd (-Dstatic-llvm links it)") orelse true;
+     const enable_ios_sdk = b.option(bool, "enable-ios-sdk", "Run tests requiring presence of iOS SDK and frameworks") orelse false;
+     const enable_macos_sdk = b.option(bool, "enable-macos-sdk", "Run tests requiring presence of macOS SDK and frameworks") orelse enable_ios_sdk;
+     const enable_symlinks_windows = b.option(bool, "enable-symlinks-windows", "Run tests requiring presence of symlinks on Windows") orelse false;
+@@ -246,6 +253,7 @@
+     exe_options.addOption(bool, "llvm_has_csky", llvm_has_csky);
+     exe_options.addOption(bool, "llvm_has_arc", llvm_has_arc);
+     exe_options.addOption(bool, "llvm_has_xtensa", llvm_has_xtensa);
++    exe_options.addOption([]const u8, "llvm_targets", llvm_targets);
+     exe_options.addOption(bool, "debug_gpa", debug_gpa);
+     exe_options.addOption(DevEnv, "dev", b.option(DevEnv, "dev", "Build a compiler with a reduced feature set for development of specific features") orelse if (only_c) .bootstrap else .full);
+     exe_options.addOption(IoMode, "io_mode", io_mode);
+@@ -381,6 +389,9 @@
+                 .llvm_has_csky = llvm_has_csky,
+                 .llvm_has_arc = llvm_has_arc,
+                 .llvm_has_xtensa = llvm_has_xtensa,
++                .llvm_targets = llvm_targets,
++                .llvm_has_zlib = llvm_has_zlib,
++                .llvm_has_zstd = llvm_has_zstd,
+             });
+         }
+         if (target.result.os.tag == .windows) {
+@@ -1044,6 +1055,9 @@
+     llvm_has_csky: bool,
+     llvm_has_arc: bool,
+     llvm_has_xtensa: bool,
++    llvm_targets: []const u8,
++    llvm_has_zlib: bool,
++    llvm_has_zstd: bool,
+ }) !void {
+     // Adds the Zig C++ sources which both stage1 and stage2 need.
+     //
+@@ -1067,6 +1081,7 @@
+     }
+ 
+     for (llvm_libs) |lib_name| {
++        if (!llvmLibBuilt(lib_name, options.llvm_targets)) continue;
+         mod.linkSystemLibrary(lib_name, lsl_options);
+     }
+ 
+@@ -1086,8 +1101,8 @@
+         mod.linkSystemLibrary(lib_name, lsl_options);
+     };
+ 
+-    mod.linkSystemLibrary("z", lsl_options);
+-    mod.linkSystemLibrary("zstd", lsl_options);
++    if (options.llvm_has_zlib) mod.linkSystemLibrary("z", lsl_options);
++    if (options.llvm_has_zstd) mod.linkSystemLibrary("zstd", lsl_options);
+ 
+     if (mod.resolved_target.?.result.os.tag != .windows or mod.resolved_target.?.result.abi != .msvc) {
+         // This means we rely on clang-or-zig-built LLVM, Clang, LLD libraries.
+@@ -1101,6 +1116,29 @@
+     }
+ }
+ 
++/// LLVM's default targets, in the spelling of `llvm-config --targets-built` and of their libraries' names.
++const llvm_default_targets = [_][]const u8{
++    "AArch64", "AMDGPU",  "ARM",   "AVR",   "BPF",   "Hexagon", "Lanai", "LoongArch",   "Mips", "MSP430",
++    "NVPTX",   "PowerPC", "RISCV", "SPIRV", "Sparc", "SystemZ", "VE",    "WebAssembly", "X86",  "XCore",
++};
++
++/// Whether the LLVM library `lib_name` is built, given `llvm_targets` (space-separated; empty means all):
++/// a target's libraries (`LLVM<Target><Component>`) only when that target is.
++fn llvmLibBuilt(lib_name: []const u8, llvm_targets: []const u8) bool {
++    if (llvm_targets.len == 0 or !mem.startsWith(u8, lib_name, "LLVM")) return true;
++    const rest = lib_name["LLVM".len..];
++    for (llvm_default_targets) |t| {
++        if (!mem.startsWith(u8, rest, t)) continue;
++        if (rest.len > t.len and !std.ascii.isUpper(rest[t.len])) continue;
++        var it = mem.tokenizeScalar(u8, llvm_targets, ' ');
++        while (it.next()) |built| {
++            if (mem.eql(u8, built, t)) return true;
++        }
++        return false;
++    }
++    return true;
++}
++
+ fn addCxxKnownPath(
+     b: *std.Build,
+     ctx: CMakeConfig,
+--- a/cmake/Findllvm.cmake
++++ b/cmake/Findllvm.cmake
+@@ -83,14 +83,14 @@
+       OUTPUT_STRIP_TRAILING_WHITESPACE)
+     string(REPLACE " " ";" LLVM_TARGETS_BUILT "${LLVM_TARGETS_BUILT_SPACES}")
+ 
+-    set(ZIG_LLVM_REQUIRED_TARGETS "AArch64;AMDGPU;ARM;AVR;BPF;Hexagon;Lanai;LoongArch;Mips;MSP430;NVPTX;PowerPC;RISCV;SPIRV;Sparc;SystemZ;VE;WebAssembly;X86;XCore")
++    set(ZIG_LLVM_REQUIRED_TARGETS "X86")
+ 
+     set(ZIG_LLVM_REQUIRED_TARGETS_ENABLED TRUE)
+     foreach(TARGET_NAME IN LISTS ZIG_LLVM_REQUIRED_TARGETS)
+       list (FIND LLVM_TARGETS_BUILT "${TARGET_NAME}" _index)
+       if (${_index} EQUAL -1)
+         # Save the error message, in case this is the last llvm-config we find
+-        list(APPEND LLVM_CONFIG_ERROR_MESSAGES "LLVM (according to ${LLVM_CONFIG_EXE}) is missing target ${TARGET_NAME}. Zig requires LLVM to be built with all default targets enabled.")
++        list(APPEND LLVM_CONFIG_ERROR_MESSAGES "LLVM (according to ${LLVM_CONFIG_EXE}) is missing target ${TARGET_NAME}. Zig requires LLVM to be built with at least the X86 target.")
+ 
+         # Ignore this directory and try the search again
+         list(APPEND CMAKE_IGNORE_PATH "${LLVM_CONFIG_DIR}")
+--- a/src/Compilation/Config.zig
++++ b/src/Compilation/Config.zig
+@@ -127,6 +127,7 @@
+     ThreadsRequireSharedMemory,
+     EmittingLlvmModuleRequiresLlvmBackend,
+     LlvmLacksTargetSupport,
++    LlvmBackendNotBuilt,
+     ZigLacksTargetSupport,
+     EmittingBinaryRequiresLlvmLibrary,
+     LldIncompatibleObjectFormat,
+@@ -368,6 +369,8 @@
+         // we are confident in the robustness of the backend.
+         break :b !target_util.selfHostedBackendIsAsRobustAsLlvm(target);
+     };
++    if (use_llvm and use_lib_llvm and !target_util.llvmBackendBuilt(target.cpu.arch))
++        return error.LlvmBackendNotBuilt;
+     const backend = target_util.zigBackend(target, use_llvm);
+ 
+     if (options.emit_bin and options.have_zcu) {
+--- a/src/codegen/llvm.zig
++++ b/src/codegen/llvm.zig
+@@ -4562,105 +4562,105 @@
+     defer target_registry_mutex.unlock(io);
+ 
+     switch (arch) {
+-        .aarch64, .aarch64_be => {
++        .aarch64, .aarch64_be => if (comptime target_util.llvmTargetBuilt("AArch64")) {
+             bindings.LLVMInitializeAArch64Target();
+             bindings.LLVMInitializeAArch64TargetInfo();
+             bindings.LLVMInitializeAArch64TargetMC();
+             bindings.LLVMInitializeAArch64AsmPrinter();
+             bindings.LLVMInitializeAArch64AsmParser();
+         },
+-        .amdgcn => {
++        .amdgcn => if (comptime target_util.llvmTargetBuilt("AMDGPU")) {
+             bindings.LLVMInitializeAMDGPUTarget();
+             bindings.LLVMInitializeAMDGPUTargetInfo();
+             bindings.LLVMInitializeAMDGPUTargetMC();
+             bindings.LLVMInitializeAMDGPUAsmPrinter();
+             bindings.LLVMInitializeAMDGPUAsmParser();
+         },
+-        .thumb, .thumbeb, .arm, .armeb => {
++        .thumb, .thumbeb, .arm, .armeb => if (comptime target_util.llvmTargetBuilt("ARM")) {
+             bindings.LLVMInitializeARMTarget();
+             bindings.LLVMInitializeARMTargetInfo();
+             bindings.LLVMInitializeARMTargetMC();
+             bindings.LLVMInitializeARMAsmPrinter();
+             bindings.LLVMInitializeARMAsmParser();
+         },
+-        .avr => {
++        .avr => if (comptime target_util.llvmTargetBuilt("AVR")) {
+             bindings.LLVMInitializeAVRTarget();
+             bindings.LLVMInitializeAVRTargetInfo();
+             bindings.LLVMInitializeAVRTargetMC();
+             bindings.LLVMInitializeAVRAsmPrinter();
+             bindings.LLVMInitializeAVRAsmParser();
+         },
+-        .bpfel, .bpfeb => {
++        .bpfel, .bpfeb => if (comptime target_util.llvmTargetBuilt("BPF")) {
+             bindings.LLVMInitializeBPFTarget();
+             bindings.LLVMInitializeBPFTargetInfo();
+             bindings.LLVMInitializeBPFTargetMC();
+             bindings.LLVMInitializeBPFAsmPrinter();
+             bindings.LLVMInitializeBPFAsmParser();
+         },
+-        .hexagon => {
++        .hexagon => if (comptime target_util.llvmTargetBuilt("Hexagon")) {
+             bindings.LLVMInitializeHexagonTarget();
+             bindings.LLVMInitializeHexagonTargetInfo();
+             bindings.LLVMInitializeHexagonTargetMC();
+             bindings.LLVMInitializeHexagonAsmPrinter();
+             bindings.LLVMInitializeHexagonAsmParser();
+         },
+-        .lanai => {
++        .lanai => if (comptime target_util.llvmTargetBuilt("Lanai")) {
+             bindings.LLVMInitializeLanaiTarget();
+             bindings.LLVMInitializeLanaiTargetInfo();
+             bindings.LLVMInitializeLanaiTargetMC();
+             bindings.LLVMInitializeLanaiAsmPrinter();
+             bindings.LLVMInitializeLanaiAsmParser();
+         },
+-        .mips, .mipsel, .mips64, .mips64el => {
++        .mips, .mipsel, .mips64, .mips64el => if (comptime target_util.llvmTargetBuilt("Mips")) {
+             bindings.LLVMInitializeMipsTarget();
+             bindings.LLVMInitializeMipsTargetInfo();
+             bindings.LLVMInitializeMipsTargetMC();
+             bindings.LLVMInitializeMipsAsmPrinter();
+             bindings.LLVMInitializeMipsAsmParser();
+         },
+-        .msp430 => {
++        .msp430 => if (comptime target_util.llvmTargetBuilt("MSP430")) {
+             bindings.LLVMInitializeMSP430Target();
+             bindings.LLVMInitializeMSP430TargetInfo();
+             bindings.LLVMInitializeMSP430TargetMC();
+             bindings.LLVMInitializeMSP430AsmPrinter();
+             bindings.LLVMInitializeMSP430AsmParser();
+         },
+-        .nvptx, .nvptx64 => {
++        .nvptx, .nvptx64 => if (comptime target_util.llvmTargetBuilt("NVPTX")) {
+             bindings.LLVMInitializeNVPTXTarget();
+             bindings.LLVMInitializeNVPTXTargetInfo();
+             bindings.LLVMInitializeNVPTXTargetMC();
+             bindings.LLVMInitializeNVPTXAsmPrinter();
+             // There is no LLVMInitializeNVPTXAsmParser function available.
+         },
+-        .powerpc, .powerpcle, .powerpc64, .powerpc64le => {
++        .powerpc, .powerpcle, .powerpc64, .powerpc64le => if (comptime target_util.llvmTargetBuilt("PowerPC")) {
+             bindings.LLVMInitializePowerPCTarget();
+             bindings.LLVMInitializePowerPCTargetInfo();
+             bindings.LLVMInitializePowerPCTargetMC();
+             bindings.LLVMInitializePowerPCAsmPrinter();
+             bindings.LLVMInitializePowerPCAsmParser();
+         },
+-        .riscv32, .riscv32be, .riscv64, .riscv64be => {
++        .riscv32, .riscv32be, .riscv64, .riscv64be => if (comptime target_util.llvmTargetBuilt("RISCV")) {
+             bindings.LLVMInitializeRISCVTarget();
+             bindings.LLVMInitializeRISCVTargetInfo();
+             bindings.LLVMInitializeRISCVTargetMC();
+             bindings.LLVMInitializeRISCVAsmPrinter();
+             bindings.LLVMInitializeRISCVAsmParser();
+         },
+-        .sparc, .sparc64 => {
++        .sparc, .sparc64 => if (comptime target_util.llvmTargetBuilt("Sparc")) {
+             bindings.LLVMInitializeSparcTarget();
+             bindings.LLVMInitializeSparcTargetInfo();
+             bindings.LLVMInitializeSparcTargetMC();
+             bindings.LLVMInitializeSparcAsmPrinter();
+             bindings.LLVMInitializeSparcAsmParser();
+         },
+-        .s390x => {
++        .s390x => if (comptime target_util.llvmTargetBuilt("SystemZ")) {
+             bindings.LLVMInitializeSystemZTarget();
+             bindings.LLVMInitializeSystemZTargetInfo();
+             bindings.LLVMInitializeSystemZTargetMC();
+             bindings.LLVMInitializeSystemZAsmPrinter();
+             bindings.LLVMInitializeSystemZAsmParser();
+         },
+-        .wasm32, .wasm64 => {
++        .wasm32, .wasm64 => if (comptime target_util.llvmTargetBuilt("WebAssembly")) {
+             bindings.LLVMInitializeWebAssemblyTarget();
+             bindings.LLVMInitializeWebAssemblyTargetInfo();
+             bindings.LLVMInitializeWebAssemblyTargetMC();
+@@ -4683,7 +4683,7 @@
+                 bindings.LLVMInitializeXtensaAsmParser();
+             }
+         },
+-        .xcore => {
++        .xcore => if (comptime target_util.llvmTargetBuilt("XCore")) {
+             bindings.LLVMInitializeXCoreTarget();
+             bindings.LLVMInitializeXCoreTargetInfo();
+             bindings.LLVMInitializeXCoreTargetMC();
+@@ -4708,7 +4708,7 @@
+                 bindings.LLVMInitializeCSKYAsmParser();
+             }
+         },
+-        .ve => {
++        .ve => if (comptime target_util.llvmTargetBuilt("VE")) {
+             bindings.LLVMInitializeVETarget();
+             bindings.LLVMInitializeVETargetInfo();
+             bindings.LLVMInitializeVETargetMC();
+@@ -4724,7 +4724,7 @@
+                 // There is no LLVMInitializeARCAsmParser function.
+             }
+         },
+-        .loongarch32, .loongarch64 => {
++        .loongarch32, .loongarch64 => if (comptime target_util.llvmTargetBuilt("LoongArch")) {
+             bindings.LLVMInitializeLoongArchTarget();
+             bindings.LLVMInitializeLoongArchTargetInfo();
+             bindings.LLVMInitializeLoongArchTargetMC();
+@@ -4733,7 +4733,7 @@
+         },
+         .spirv32,
+         .spirv64,
+-        => {
++        => if (comptime target_util.llvmTargetBuilt("SPIRV")) {
+             bindings.LLVMInitializeSPIRVTarget();
+             bindings.LLVMInitializeSPIRVTargetInfo();
+             bindings.LLVMInitializeSPIRVTargetMC();
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -4309,6 +4309,7 @@
+             error.ThreadsRequireSharedMemory => fatal("threads require shared memory", .{}),
+             error.EmittingLlvmModuleRequiresLlvmBackend => fatal("emitting an LLVM module requires using the LLVM backend", .{}),
+             error.LlvmLacksTargetSupport => fatal("LLVM lacks support for the specified target", .{}),
++            error.LlvmBackendNotBuilt => fatal("this Zig for Mavericks was built with LLVM targets {s}; {t} is not one of them", .{ target_util.llvm_targets, target.cpu.arch }),
+             error.ZigLacksTargetSupport => fatal("compiler backend unavailable for the specified target", .{}),
+             error.EmittingBinaryRequiresLlvmLibrary => fatal("producing machine code via LLVM requires using the LLVM library", .{}),
+             error.LldIncompatibleObjectFormat => fatal("using LLD to link {s} files is unsupported", .{@tagName(target.ofmt)}),
+--- a/src/target.zig
++++ b/src/target.zig
+@@ -8,6 +8,7 @@
+ const Alignment = @import("InternPool.zig").Alignment;
+ const Compilation = @import("Compilation.zig");
+ const Feature = @import("Zcu.zig").Feature;
++const build_options = @import("build_options");
+ 
+ pub const default_stack_protector_buffer_size = 4;
+ 
+@@ -277,6 +278,47 @@
+     };
+ }
+ 
++/// The LLVM targets this compiler's LLVM libraries were built with, as `llvm-config --targets-built`
++/// prints them; empty means all of LLVM's default targets.
++pub const llvm_targets: []const u8 = if (@hasDecl(build_options, "llvm_targets")) build_options.llvm_targets else "";
++
++/// Whether the LLVM target `name` (LLVM's spelling, such as "AArch64") was built.
++pub fn llvmTargetBuilt(name: []const u8) bool {
++    if (llvm_targets.len == 0) return true;
++    var it = std.mem.tokenizeScalar(u8, llvm_targets, ' ');
++    while (it.next()) |built| {
++        if (std.mem.eql(u8, built, name)) return true;
++    }
++    return false;
++}
++
++/// Whether the LLVM backend for `arch` was built into this compiler's LLVM libraries.
++pub fn llvmBackendBuilt(arch: std.Target.Cpu.Arch) bool {
++    return switch (arch) {
++        .aarch64, .aarch64_be => llvmTargetBuilt("AArch64"),
++        .amdgcn => llvmTargetBuilt("AMDGPU"),
++        .arm, .armeb, .thumb, .thumbeb => llvmTargetBuilt("ARM"),
++        .avr => llvmTargetBuilt("AVR"),
++        .bpfel, .bpfeb => llvmTargetBuilt("BPF"),
++        .hexagon => llvmTargetBuilt("Hexagon"),
++        .lanai => llvmTargetBuilt("Lanai"),
++        .loongarch32, .loongarch64 => llvmTargetBuilt("LoongArch"),
++        .mips, .mipsel, .mips64, .mips64el => llvmTargetBuilt("Mips"),
++        .msp430 => llvmTargetBuilt("MSP430"),
++        .nvptx, .nvptx64 => llvmTargetBuilt("NVPTX"),
++        .powerpc, .powerpcle, .powerpc64, .powerpc64le => llvmTargetBuilt("PowerPC"),
++        .riscv32, .riscv32be, .riscv64, .riscv64be => llvmTargetBuilt("RISCV"),
++        .spirv32, .spirv64 => llvmTargetBuilt("SPIRV"),
++        .sparc, .sparc64 => llvmTargetBuilt("Sparc"),
++        .s390x => llvmTargetBuilt("SystemZ"),
++        .ve => llvmTargetBuilt("VE"),
++        .wasm32, .wasm64 => llvmTargetBuilt("WebAssembly"),
++        .x86, .x86_64 => llvmTargetBuilt("X86"),
++        .xcore => llvmTargetBuilt("XCore"),
++        else => true,
++    };
++}
++
+ /// The set of targets that Zig supports using LLD to link for.
+ pub fn hasLldSupport(ofmt: std.Target.ObjectFormat) bool {
+     return switch (ofmt) {
+--- a/stage1/config.zig.in
++++ b/stage1/config.zig.in
+@@ -3,6 +3,7 @@
+ pub const llvm_has_csky = false;
+ pub const llvm_has_arc = false;
+ pub const llvm_has_xtensa = false;
++pub const llvm_targets: []const u8 = "@LLVM_TARGETS_BUILT_SPACES@";
+ pub const version: [:0]const u8 = "@RESOLVED_ZIG_VERSION@";
+ pub const semver = @import("std").SemanticVersion.parse(version) catch unreachable;
+ pub const enable_debug_extensions = false;
