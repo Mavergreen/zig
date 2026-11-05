@@ -1,0 +1,14 @@
+name: repackage-on-ingredient-bump
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - components/clang/version
+      - components/recaulk/version
+
+jobs:
+  repackage:
+    permissions:
+      actions: write
+    uses: Mavergreen/shipyard/.github/workflows/repackage-on-ingredient-bump.yml@v1
