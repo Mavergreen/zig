@@ -1,0 +1,15 @@
+.{
+    .name = .fetch_project,
+    .version = "0.0.0",
+    .fingerprint = 0xbcda0b5dfdffc2e4,
+    .dependencies = .{
+        .jsmn = .{
+            .url = "https://github.com/zserge/jsmn/archive/refs/tags/v1.1.0.tar.gz",
+            .hash = "N-V-__8AABapAAAWjflMcfTZ4IT4AkJgNprG83qCygwNuMDG",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}
