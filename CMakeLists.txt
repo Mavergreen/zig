@@ -23,6 +23,7 @@ mavericks_resolve_version(MAV_ZIG_VERSION)
 mavericks_add_updater_app(
   PRODUCT ${_short}
   PRODUCT_NAME "${_product}"
+  ICON "${CMAKE_SOURCE_DIR}/updater/zig.icns"
   VERSION "${MAV_ZIG_VERSION}"
   LOG_PREFIX "MavZigUpdater"
   CONFIRM_TITLE "${_product} updated"

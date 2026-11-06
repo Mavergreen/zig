@@ -1,0 +1,17 @@
+Updater icon: the Zig logomark, zig-mark.svg from ziglang/logo
+(https://github.com/ziglang/logo), at commit
+4f97e7a9ebce12fa48511c0b6502b6190005bc0e:
+https://github.com/ziglang/logo/blob/4f97e7a9ebce12fa48511c0b6502b6190005bc0e/zig-mark.svg
+
+License: Creative Commons Attribution-ShareAlike 4.0 International
+(CC BY-SA 4.0, https://creativecommons.org/licenses/by-sa/4.0/), as that
+repository's README states. Logo by the Zig Software Foundation and the Zig
+project.
+
+zig.icns is a derived work: the SVG rasterized with ImageMagick 7.1.2-21 (its
+MSVG renderer) at the standard iconset sizes, on a transparent canvas with a 5%
+margin, then packed with iconutil. It is likewise licensed under CC BY-SA 4.0.
+
+This is an unofficial community build of Zig for Mac OS X 10.9 (Mavericks). It
+is not affiliated with or endorsed by the Zig Software Foundation or the Zig
+project.

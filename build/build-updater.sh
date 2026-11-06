@@ -2,8 +2,7 @@
 # platform: macOS-only -- ditto copies a built app bundle that find lays out deeper than the build root
 #   usage: build-updater.sh native|cross     prints the built .app path. Builds with the clang22 components/clang/version
 #          pins (shipyard's fetch_clang22.sh: on 10.9 the native clang22, elsewhere clang22-cross), in a fresh build
-#          directory. No updater icon has been chosen yet, so it builds with -DMAVERICKS_ALLOW_GENERIC_ICON=ON: the
-#          standard macOS app icon, no artwork embedded.
+#          directory. The icon is updater/zig.icns, Zig's logomark (see updater/ICON-CREDIT.txt).
 # spec: shipyard SKILL.md "Sparkle updater" -- the updater builds with clang22 on every host, one configure per arch
 set -eu
 v="${1:?usage: build-updater.sh native|cross}"
@@ -18,7 +17,6 @@ CL="$(sh "$SHIPYARD_SCRIPTS/fetch_clang22.sh" "$ROOT/components/clang")" || { ec
 # platform: a build directory configured before keeps its cached compiler, so a reconfigure could not move to clang22
 rm -rf "$B"
 "$SYCM" -S "$ROOT" -B "$B" -DZIG_VARIANT="$v" -DCMAKE_OSX_ARCHITECTURES="$arch" \
-  -DMAVERICKS_ALLOW_GENERIC_ICON=ON \
   -DCMAKE_OBJC_COMPILER="$CL/bin/clang" -DCMAKE_OBJC_COMPILER_TARGET="$arch-apple-macos$floor" \
   -DCMAKE_OBJC_FLAGS=--no-default-config -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
   -DCMAKE_TOOLCHAIN_FILE="$(dirname "$SHIPYARD_SCRIPTS")/MavericksToolchain.cmake" >&2
