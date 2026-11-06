@@ -83,16 +83,6 @@
              else => |e| return diags.failParse(sdk_settings_path, "failed to parse Darwin SDK settings: {t}", .{e}),
          };
  
-@@ -1270,7 +1275,8 @@ pub const File = struct {
-             else => return diags.failParse(sdk_settings_path, "failed to parse Darwin SDK settings: file is not a JSON object", .{}),
-         };
- 
--        const version_json = parsed_object.get("MinimalDisplayName") orelse return diags.failParse(
-+        // The family's 10.9 SDK carries only the SDKSettings.json keys LLVM reads, Version among them.
-+        const version_json = parsed_object.get("MinimalDisplayName") orelse parsed_object.get("Version") orelse return diags.failParse(
-             sdk_settings_path,
-             "failed to parse Darwin SDK settings: 'MinimalDisplayName' missing",
-             .{},
 @@ -1287,6 +1293,23 @@ pub const File = struct {
          try base.setDarwinSdkVersion(version);
      }

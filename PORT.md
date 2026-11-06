@@ -112,9 +112,6 @@ links to `../sdk109/SDKs`).
   beside libSystem, unlike clang22's output. Both rules are gated by `isMavericksTarget` in
   `parseDependentDylibs`: every other target (`aarch64-macos`, Apple Silicon's `native`, an
   explicit `x86_64-macos.11.0` or later) records sub-libraries exactly as upstream does.
-- The linker reads the SDK version from `SDKSettings.json`'s `Version` when it has no
-  `MinimalDisplayName`: shipyard's `MAVERICKS_SDK_SETTINGS_JSON=1` 10.9 SDK carries only the keys LLVM
-  reads.
 - `std.zig.system.darwin.getSdk` treats an empty `xcrun --show-sdk-path` as no SDK.
 
 **Why.** The compat guard reads the SDK a binary records, and the family pins 10.9's: a 10.9 program
@@ -145,8 +142,7 @@ the pinned SDK's binary stubs and against a `.tbd` SDK made from them by clang22
 -stubify`: `tests/link-test.sh`'s `trivial_load_commands` and `tbd_sdk_load_commands`.
 
 **Reconsider** when Zig grows a configurable default SDK or deployment target per toolchain build,
-or when the family stops pinning 10.9's SDK. Offer the three stub-library fixes upstream; drop the
-`Version` fallback once shipyard's and Longboat's `SDKSettings.json` carry `MinimalDisplayName`.
+or when the family stops pinning 10.9's SDK. Offer the three stub-library fixes upstream.
 Exit for the plist reading: once Longboat's `sdk109` installs an `SDKSettings.json` (a shipyard
 change), and every supported Longboat installs one, drop `plistSdkVersion` and require the JSON again.
 
