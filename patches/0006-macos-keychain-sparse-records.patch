@@ -1,0 +1,38 @@
+--- a/lib/std/crypto/Certificate/Bundle.zig
++++ b/lib/std/crypto/Certificate/Bundle.zig
+@@ -90,6 +90,7 @@ pub fn rescan(cb: *Bundle, gpa: Allocator, io: Io, now: Io.Timestamp) RescanErro
+ 
+ const rescanMac = @import("Bundle/macos.zig").rescanMac;
+ pub const addMavergreenBundle = @import("Bundle/macos.zig").addMavergreenBundle;
++pub const addKeychain = @import("Bundle/macos.zig").addKeychain;
+ const RescanMacError = @import("Bundle/macos.zig").RescanMacError;
+ 
+ const RescanLinuxError = AddCertsFromFilePathError || AddCertsFromDirPathError;
+--- a/lib/std/crypto/Certificate/Bundle/macos.zig
++++ b/lib/std/crypto/Certificate/Bundle/macos.zig
+@@ -69,6 +69,15 @@ fn addPemBundle(cb: *Bundle, gpa: Allocator, io: Io, now: Io.Timestamp, path: []
+     }
+ }
+ 
++/// Adds the certificates of the keychain file `bytes` to `cb`, as rescanMac does for each keychain it reads.
++pub fn addKeychain(cb: *Bundle, gpa: Allocator, bytes: []const u8, now_sec: i64) !void {
++    var reader: Io.Reader = .fixed(bytes);
++    scanReader(cb, gpa, &reader, now_sec) catch |err| switch (err) {
++        error.ReadFailed => unreachable, // prebuffered
++        else => |e| return e,
++    };
++}
++
+ fn scanReader(cb: *Bundle, gpa: Allocator, reader: *Io.Reader, now_sec: i64) !void {
+     const db_header = try reader.takeStruct(ApplDbHeader, .big);
+     assert(mem.eql(u8, &db_header.signature, "kych"));
+@@ -94,7 +103,8 @@ fn scanReader(cb: *Bundle, gpa: Allocator, reader: *Io.Reader, now_sec: i64) !vo
+             continue;
+         }
+ 
+-        var record_list = try gpa.alloc(u32, table_header.record_count);
++        // record_count counts records; the offset list has a slot for every record number, deleted ones included.
++        var record_list = try gpa.alloc(u32, table_header.record_numbers_count);
+         defer gpa.free(record_list);
+ 
+         var record_idx: u32 = 0;

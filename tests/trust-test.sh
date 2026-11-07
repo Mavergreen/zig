@@ -2,7 +2,8 @@
 # platform: macOS-only -- runs the staged host zig's std against this Mac's keychain roots
 #   usage: trust-test.sh     tests that the std of the zig build-host-zig.sh staged for this machine (ZIG names an
 #          installed zig instead) unions the ca-certs bundle with the macOS keychain roots: a bundle's certs are
-#          added, an absent bundle changes nothing, and a bad one is skipped with one warning, keychain roots kept.
+#          added, an absent bundle changes nothing, and a bad one is skipped with one warning, keychain roots kept;
+#          and that a keychain whose certificate table has more slots than records yields every record (0006).
 #          Drives zig test tests/fixtures/trust_test.zig, which never reads the real ca-certs path. SKIP (77) when
 #          nothing is staged.
 set -eu
@@ -13,7 +14,7 @@ staged_zig_init trust-test
 ZIG="$(staged_zig_prefix "$T/mavergreen")"
 cp "$HERE/fixtures/trust_test.zig" "$HERE/fixtures/trust-test-ca.pem" "$T/"
 
-TESTS="keychain_roots bundle_adds_certs bundle_absent bundle_unreadable bundle_malformed_after_valid"
+TESTS="keychain_roots keychain_sparse_records bundle_adds_certs bundle_absent bundle_unreadable bundle_malformed_after_valid"
 rc=0; (cd "$T" && "$ZIG" test trust_test.zig) >"$T/out" 2>&1 || rc=$?
 if [ "$rc" -ne 0 ] || ! grep -q "^All $(echo $TESTS | wc -w | tr -d ' ') tests passed\.$" "$T/out"; then
   cat "$T/out"; echo "FAIL trust-test: zig test tests/fixtures/trust_test.zig must pass all of: $TESTS"; exit 1

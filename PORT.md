@@ -268,3 +268,33 @@ align with golang's trust invariants in a trust-policy brainstorm.
 **Reconsider** at that brainstorm, when the family stops targeting 10.9 (a current macOS's keychain
 roots stay updated), or if upstream Zig grows a way to add a CA bundle to the system scan (an
 environment variable or option), which would replace the fixed path.
+
+## 0006-macos-keychain-sparse-records.patch
+
+**What.** `std.crypto.Certificate.Bundle`'s macOS keychain reader (`scanReader` in
+`Bundle/macos.zig`) reads a certificate table's offset list for `record_numbers_count` slots, where
+upstream reads `record_count` of them. Its existing checks already skip empty slots (offset 0) and
+deleted ones (unaligned). The new `pub fn addKeychain(cb, gpa, bytes, now_sec) !void`, also reachable as
+`Bundle.addKeychain`, scans one keychain file's bytes as `rescanMac` does for each keychain, so a test
+can hand it a crafted keychain.
+- Like 0005, it applies on every macOS host and target: it fixes the runtime trust store, not a
+  10.9 target behaviour.
+
+**Why.** `record_count` counts the records present, but the offset list has a slot for every record
+number, deleted ones included. Upstream therefore sees only the records among the first
+`record_count` slots.
+- On the maintainer's 10.9 box, `/Library/Keychains/System.keychain`'s certificate table has
+  `record_count` 23 and `record_numbers_count` 143, with its 23 records at slots 0, 1, 98–116, 141 and 142.
+- Upstream Zig saw 2 of the 23, and none of the roots AquaTransport adds there (ISRG Root X1 and X2,
+  USERTrust ECC and RSA).
+- So `std.http.Client` and `zig fetch` failed with `TlsInitializationFailed` for ziglang.org,
+  github.com and letsencrypt.org. With 0006 the bundle grew from 132 to 145 certificates, and all
+  three succeed.
+- Any Mac whose keychain has had a certificate deleted is affected, not only 10.9.
+
+**Invariant.** Every live record in a keychain's certificate table joins the bundle, wherever its
+slot. `tests/trust-test.sh`'s `keychain_sparse_records` holds it: a crafted keychain lists three slots
+(empty, deleted, the fixture certificate) with `record_count` 1, and `addKeychain` must add exactly
+that certificate.
+
+**Reconsider** when upstream Zig's keychain reader changes; drop the patch once it reads every slot.
