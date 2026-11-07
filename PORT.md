@@ -310,23 +310,25 @@ patch keeps upstream's behaviour.
   behaviour. `zig cc` uses clang and is unaffected.
 
 **Why.** Upstream's rule works only for a file that sits directly in a search directory; aro's own
-comment called it "not the correct interpretation of `#include_next`". Recaulk's `stdlib.h`,
-`dirent.h` and `netdb.h` include a second-level wrapper in `recaulk/_recaulk_macports/`, which then
-does `#include_next <X.h>`. That directory is not on the search path, so upstream aro skipped every
-directory and failed with `'stdlib.h' not found`.
-- So for a 10.9 target, any translate-c of a header that reaches one of them failed. The Ghostty
-  probe hit it (`.superpowers/specs/2026-11-06-ghostty-probe-findings.md`).
+comment called it "not the correct interpretation of `#include_next`". Recaulk ships MacPorts'
+headers in subdirectories of its include directory (`sys/cdefs.h`, `sys/types.h`, `sys/socket.h`,
+`secure/_common.h`), and each does `#include_next` from there. Upstream aro skips every search
+directory for those and fails with `'X.h' not found`.
+- Before Recaulk 20261107.2, `stdlib.h`, `dirent.h` and `netdb.h` also went through a wrapper in
+  `recaulk/_recaulk_macports/`. So for a 10.9 target, any translate-c that reached one of them
+  failed; the Ghostty probe hit it (`.superpowers/specs/2026-11-06-ghostty-probe-findings.md`).
+  Recaulk 20261107.2 moved those three wrappers to `_recaulk_macports_X.h`, directly on the search
+  path; the subdirectory headers above still need this patch.
 - clang continues after the directory a file was found through. aro does not record that, and for
-  wrappers like Recaulk's the deepest containing search directory is the same one.
+  headers like Recaulk's the deepest containing search directory is the same one.
 
 **Invariant.** A header in a subdirectory of a search directory continues an `#include_next` after
 that search directory, and a 10.9 target translates `<stdlib.h>`, `<dirent.h>` and `<netdb.h>`.
 `tests/translate-c-test.sh` holds both (`include_next_from_subdir`, which needs no Recaulk, and
 `mavericks_libc_headers`), and `tests/smoke-cross.sh` runs it in CI.
 
-**Reconsider** when upstream aro tracks the directory each file was found through. Recaulk is also
-flattening those three wrappers, which removes the 10.9 symptom without this patch but leaves the
-aro bug for anyone else's two-level headers.
+**Reconsider** when upstream aro tracks the directory each file was found through. Recaulk's flat
+wrappers do not retire it: its subdirectory headers, and anyone else's, still need it.
 
 ## 0008-std-mavericks-sdk.patch
 
