@@ -3,7 +3,8 @@
 #   usage: smoke-cross.sh VERSION [CASE...]     smokes the zig-cross installed at ZIG_PREFIX (default
 #          /usr/local/mavergreen/zig-cross, with sdk109 beside it) on Apple Silicon: its manifest says VERSION,
 #          zig version is UPSTREAM_VERSION, a host (arm64) hello.zig runs, tests/compat-matrix.sh passes with
-#          it, and zig build of tests/fixtures/build-runner runs its build runner and generator as arm64 host
+#          it, tests/translate-c-test.sh and tests/std-sdk-test.sh pass with it (where xcrun's SDK is a modern one),
+#          and zig build of tests/fixtures/build-runner runs its build runner and generator as arm64 host
 #          programs while the artifact it installs is a 10.9 x86_64 one. Every case runs unless CASEs are
 #          named. Needs SHIPYARD_SCRIPTS or a shipyard install, for the compat guard. SKIP (77) on any host
 #          but arm64, without VERSION, or when no case ran. The manifest case SKIPs only when ZIG_PREFIX is
@@ -59,6 +60,14 @@ compat_matrix() {
   sh "$HERE/compat-matrix.sh" "$ZIG" "$T/matrix" || { echo "FAIL compat_matrix: tests/compat-matrix.sh failed with $ZIG"; return 1; }
 }
 
+translate_c() {
+  ZIG="$ZIG" sh "$HERE/translate-c-test.sh" || { echo "FAIL translate_c: tests/translate-c-test.sh failed with $ZIG"; return 1; }
+}
+
+std_sdk() {
+  ZIG="$ZIG" sh "$HERE/std-sdk-test.sh" || { echo "FAIL std_sdk: tests/std-sdk-test.sh failed with $ZIG"; return 1; }
+}
+
 build_runner_on_arm64() {
   (cd "$T/build-runner" && "$ZIG" build -Dtarget=x86_64-macos --prefix "$T/build-runner/out") \
     || { echo "FAIL build_runner_on_arm64: zig build of tests/fixtures/build-runner (which runs gen.zig at build time) failed"; return 1; }
@@ -76,11 +85,11 @@ build_runner_on_arm64() {
   [ "$n" -ge 2 ] || { echo "FAIL build_runner_on_arm64: expected the build runner and gen in the caches, found $n of them"; return 1; }
 }
 
-[ $# -gt 0 ] || set -- manifest_version zig_version host_hello compat_matrix build_runner_on_arm64
+[ $# -gt 0 ] || set -- manifest_version zig_version host_hello compat_matrix translate_c std_sdk build_runner_on_arm64
 failed=0; ran=0
 for tcase in "$@"; do
   case "$tcase" in
-    manifest_version|zig_version|host_hello|compat_matrix|build_runner_on_arm64) ;;
+    manifest_version|zig_version|host_hello|compat_matrix|translate_c|std_sdk|build_runner_on_arm64) ;;
     *) echo "FAIL smoke-cross: no case '$tcase'"; failed=$((failed + 1)); continue ;;
   esac
   rc=0; "$tcase" || rc=$?

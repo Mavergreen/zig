@@ -298,3 +298,60 @@ slot. `tests/trust-test.sh`'s `keychain_sparse_records` holds it: a crafted keyc
 that certificate.
 
 **Reconsider** when upstream Zig's keychain reader changes; drop the patch once it reads every slot.
+
+## 0007-translate-c-include-next-search-dir.patch
+
+**What.** In aro, the C front end of `zig translate-c` and the build system's translate-c step,
+`#include_next` (and `__has_include_next`) continues the search after the search directory the
+including file lies under, the deepest one when several contain it. Upstream continues after the
+directory equal to the includer's own directory. When no search directory contains the includer, the
+patch keeps upstream's behaviour.
+- Like 0005 and 0006, it applies to every target: it fixes the preprocessor, not a 10.9 target
+  behaviour. `zig cc` uses clang and is unaffected.
+
+**Why.** Upstream's rule works only for a file that sits directly in a search directory; aro's own
+comment called it "not the correct interpretation of `#include_next`". Recaulk's `stdlib.h`,
+`dirent.h` and `netdb.h` include a second-level wrapper in `recaulk/_recaulk_macports/`, which then
+does `#include_next <X.h>`. That directory is not on the search path, so upstream aro skipped every
+directory and failed with `'stdlib.h' not found`.
+- So for a 10.9 target, any translate-c of a header that reaches one of them failed. The Ghostty
+  probe hit it (`.superpowers/specs/2026-11-06-ghostty-probe-findings.md`).
+- clang continues after the directory a file was found through. aro does not record that, and for
+  wrappers like Recaulk's the deepest containing search directory is the same one.
+
+**Invariant.** A header in a subdirectory of a search directory continues an `#include_next` after
+that search directory, and a 10.9 target translates `<stdlib.h>`, `<dirent.h>` and `<netdb.h>`.
+`tests/translate-c-test.sh` holds both (`include_next_from_subdir`, which needs no Recaulk, and
+`mavericks_libc_headers`), and `tests/smoke-cross.sh` runs it in CI.
+
+**Reconsider** when upstream aro tracks the directory each file was found through. Recaulk is also
+flattening those three wrappers, which removes the 10.9 symptom without this patch but leaves the
+aro bug for anyone else's two-level headers.
+
+## 0008-std-mavericks-sdk.patch
+
+**What.** std gives a Mac OS X 10.9 target the SDK the compiler uses (0002), not xcrun's.
+- `std.zig.system.darwin.isMavericksTarget` is 0002's rule: x86_64 macOS with a floor below 11.0.
+- `std.zig.system.darwin.mavericksSdk(gpa, io, sdkroot)` returns `sdkroot` when non-empty, otherwise
+  Longboat's `/usr/local/mavergreen/sdk109/SDKs/MacOSX10.9.sdk` when it exists, and null otherwise.
+- `getSdk` uses it for such a target, with the process's `SDKROOT`.
+- `LibCInstallation.findNative` uses it too, with the `SDKROOT` of its `environ_map`, and for such a
+  target skips the `xcode-select` precondition, which only guards xcrun.
+- Every other target is upstream's.
+
+**Why.** 0002 makes the compiler pick the pinned SDK, but a build.zig that asks std for "the SDK"
+still ran `xcrun --sdk macosx --show-sdk-path`.
+- On a modern Mac that is the Command Line Tools' or Xcode's current SDK. Ghostty's `pkg/apple-sdk`
+  and `pkg/translate-c` pass it as `--libc`, `-isystem`, `-F` and `-L`, overriding the pin. The modern
+  `sys/qos.h` then collided with Recaulk's `pthread/qos.h`. `SDKROOT` did not change xcrun's answer.
+- On 10.9, xcrun prints nothing, so std found no SDK at all.
+
+**Invariant.** For x86_64-macos.10.9, `getSdk` and `findNative` give `SDKROOT` when set and Longboat's
+10.9 SDK otherwise; an x86_64-macos.13.0 target never gets either. `tests/std-sdk-test.sh` holds it,
+on 10.9 and (through `tests/smoke-cross.sh`, in CI) on Apple Silicon, where xcrun's answer is modern.
+
+**Reconsider** with 0002. std cannot see where the running Zig is installed, so it names Longboat's
+path where the compiler finds the SDK beside its own prefix. Both resolve to the same SDK in every
+installed Zig for Mavericks, whose pkg requires sdk109. The rule is written twice, in std and in
+`src/mavergreen.zig`, so that this patch changes only `lib/` and needs no compiler rebuild to verify.
+Fold the compiler's copy into std's when 0002 is next touched.

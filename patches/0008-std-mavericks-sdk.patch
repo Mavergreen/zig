@@ -1,0 +1,69 @@
+--- a/lib/std/zig/LibCInstallation.zig
++++ b/lib/std/zig/LibCInstallation.zig
+@@ -187,10 +187,16 @@ pub fn findNative(gpa: Allocator, io: Io, args: FindNativeOptions) FindError!Lib
+     var self: LibCInstallation = .{};
+ 
+     if (is_darwin and args.target.os.tag.isDarwin()) {
+-        if (!std.zig.system.darwin.isSdkInstalled(gpa, io))
+-            return error.DarwinSdkNotFound;
+-        self.darwin_sdk_dir = std.zig.system.darwin.getSdk(gpa, io, args.target) orelse
+-            return error.DarwinSdkNotFound;
++        const darwin = std.zig.system.darwin;
++        if (darwin.isMavericksTarget(args.target)) {
++            self.darwin_sdk_dir = darwin.mavericksSdk(gpa, io, args.environ_map.get("SDKROOT")) orelse
++                return error.DarwinSdkNotFound;
++        } else {
++            if (!darwin.isSdkInstalled(gpa, io))
++                return error.DarwinSdkNotFound;
++            self.darwin_sdk_dir = darwin.getSdk(gpa, io, args.target) orelse
++                return error.DarwinSdkNotFound;
++        }
+ 
+         const sdk = self.darwin_sdk_dir.?;
+         self.include_dir = try fs.path.join(gpa, &.{ sdk, "usr/include" });
+--- a/lib/std/zig/system/darwin.zig
++++ b/lib/std/zig/system/darwin.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const builtin = @import("builtin");
+ const Io = std.Io;
+ const mem = std.mem;
+ const Allocator = std.mem.Allocator;
+@@ -30,12 +31,36 @@ pub fn isSdkInstalled(gpa: Allocator, io: Io) bool {
+     };
+ }
+ 
++/// An x86_64 macOS target whose deployment floor is below 11.0, a Mac OS X 10.9 target.
++/// The same rule as the compiler's `isMavericksTarget` in src/mavergreen.zig (patch 0002).
++pub fn isMavericksTarget(target: *const Target) bool {
++    if (target.os.tag != .macos or target.cpu.arch != .x86_64) return false;
++    return target.os.version_range.semver.min.order(.{ .major = 11, .minor = 0, .patch = 0 }) == .lt;
++}
++
++/// Longboat's Mac OS X 10.9 SDK, which every Zig for Mavericks requires.
++pub const mavericks_sdk_path = "/usr/local/mavergreen/sdk109/SDKs/MacOSX10.9.sdk";
++
++/// The SDK of a Mac OS X 10.9 target, as the compiler chooses it: `sdkroot` when non-empty, else
++/// Longboat's 10.9 SDK, else null. Never xcrun's, which is empty on 10.9 and a newer SDK elsewhere.
++/// Caller owns the memory.
++pub fn mavericksSdk(gpa: Allocator, io: Io, sdkroot: ?[]const u8) ?[]const u8 {
++    if (sdkroot) |s| if (s.len != 0) return gpa.dupe(u8, s) catch null;
++    Io.Dir.accessAbsolute(io, mavericks_sdk_path, .{}) catch return null;
++    return gpa.dupe(u8, mavericks_sdk_path) catch null;
++}
++
+ /// Detect SDK on Darwin.
+-/// Calls `xcrun --sdk <target_sdk> --show-sdk-path` which fetches the path to the SDK.
++/// Calls `xcrun --sdk <target_sdk> --show-sdk-path` which fetches the path to the SDK; a Mac OS X 10.9
++/// target gets `mavericksSdk` instead, with the `SDKROOT` of the environment when libc is linked.
+ /// Caller owns the memory.
+ /// stderr from xcrun is ignored.
+ /// If error.OutOfMemory occurs in Allocator, this function returns null.
+ pub fn getSdk(gpa: Allocator, io: Io, target: *const Target) ?[]const u8 {
++    if (isMavericksTarget(target)) {
++        const sdkroot: ?[]const u8 = if (builtin.link_libc) if (std.c.getenv("SDKROOT")) |s| mem.span(s) else null else null;
++        return mavericksSdk(gpa, io, sdkroot);
++    }
+     const is_simulator_abi = target.abi == .simulator;
+     const sdk = switch (target.os.tag) {
+         .driverkit => "driverkit",

@@ -4,7 +4,7 @@
 #          (.zig with build-exe, .c with zig cc, .cpp with zig c++) into OUTDIR, one program per fixture named
 #          for it, and runs assert_binary_compatible.sh on each. Exits 0 only if every fixture builds and passes.
 #          Each program exits 0 when its feature works on the Mac it runs on; net and http need the internet,
-#          and http on 10.9 needs Mavergreen's ca-certs, whose roots the 10.9 keychain lacks. OUTDIR is what
+#          and http on 10.9 needs roots newer than its own, from ca-certs or System.keychain (0006). OUTDIR is what
 #          the 10.9 VM runs. With no arguments (as run-repo-tests.sh runs it), builds with the zig
 #          build-host-zig.sh staged for this machine (ZIG names an installed zig instead) into a temporary
 #          OUTDIR; SKIP (77) when nothing is staged.

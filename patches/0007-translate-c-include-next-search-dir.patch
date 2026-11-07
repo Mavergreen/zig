@@ -1,0 +1,45 @@
+--- a/lib/compiler/aro/aro/Compilation.zig
++++ b/lib/compiler/aro/aro/Compilation.zig
+@@ -2343,15 +2343,37 @@ const FindInclude = struct {
+             },
+             .only_search => {},
+             .only_search_after_dir => |other_file| {
+-                // TODO: this is not the correct interpretation of `#include_next` and friends,
+-                // because a file might not be directly inside of an include directory. To implement
+-                // this correctly, we will need to track which include directory a file has been
+-                // included from.
++                // Continue after the search directory the includer lies under, as clang
++                // continues after the one it was found through. The includer's own directory is that
++                // directory only when the includer sits directly inside it; Recaulk's wrappers do not.
++                if (try find.searchDirOf(other_file)) |index| return find.searchFrom(index + 1, include_type, includer_source);
+                 find.wait_for = std.fs.path.dirname(other_file);
+             },
+         }
++        return find.searchFrom(0, include_type, includer_source);
++    }
+ 
+-        for (comp.search_path.items) |include| {
++    /// The index of the deepest search directory that `file` lies under, if any.
++    fn searchDirOf(find: *FindInclude, file: []const u8) Allocator.Error!?usize {
++        const comp = find.comp;
++        var best: ?usize = null;
++        var best_len: usize = 0;
++        for (comp.search_path.items, 0..) |include, i| {
++            if (include.kind.isFramework()) continue;
++            const dir = try std.fs.path.resolve(comp.gpa, &.{include.path});
++            defer comp.gpa.free(dir);
++            comp.normalizePath(dir);
++            if (dir.len <= best_len or file.len <= dir.len) continue;
++            if (!mem.startsWith(u8, file, dir) or !std.fs.path.isSep(file[dir.len])) continue;
++            best = i;
++            best_len = dir.len;
++        }
++        return best;
++    }
++
++    fn searchFrom(find: *FindInclude, start: usize, include_type: IncludeType, includer_source: Source) Allocator.Error!?Result {
++        const comp = find.comp;
++        for (comp.search_path.items[start..]) |include| {
+             if (include.kind == .quote) {
+                 if (include_type != .angle_brackets) {
+                     if (try find.checkIncludeDir(include.path, .user)) |res| return res;
