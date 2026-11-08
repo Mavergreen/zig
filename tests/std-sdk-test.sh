@@ -31,7 +31,7 @@ run() { # NAME SDKROOT EXPECT
 failed=0
 if [ -d "$PINNED" ]; then run pinned "" "$PINNED" || failed=1
 else echo "SKIP pinned: Longboat's sdk109 is not installed at $PINNED"; fi
-# SDKROOT must name an SDK the compiler can build this host's test runner with, so it is the pinned one by another path.
+# platform: zig test builds this host's test runner against SDKROOT, so SDKROOT is the pinned SDK by another path.
 other="$T/other/MacOSX10.9.sdk"; mkdir -p "$T/other"; ln -s "$(staged_sdk109)" "$other"
 run sdkroot "$other" "$other" || failed=1
 [ "$failed" -eq 0 ] || exit 1
